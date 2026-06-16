@@ -1,6 +1,8 @@
 # mypy: disable-error-code=misc
 # We ignore misc errors in this file because TypedDict
 # with default values is not allowed by mypy.
+from typing import List
+
 import torch
 from metatomic.torch import System
 from typing_extensions import TypedDict
@@ -22,7 +24,7 @@ class LongRangeHypers(TypedDict):
     kspace_resolution: float = 1.33
     """Resolution of the reciprocal space grid"""
     interpolation_nodes: int = 5
-    """Number of grid points for interpolation (for PME only)"""
+    """Number of grid points for interpolation (for P3M/PME only)"""
 
 
 class LongRangeFeaturizer(torch.nn.Module):
@@ -30,23 +32,25 @@ class LongRangeFeaturizer(torch.nn.Module):
 
     :param hypers: Dictionary containing the hyperparameters for the long-range
         featurizer.
-    :param feature_dim: The dimension of the short-range features (which also
-        corresponds to the number of long-range features that will be returned).
     :param neighbor_list_options: A :py:class:`NeighborListOptions` object containing
         the neighbor list information for the short-range model.
+    :param feature_dim: The dimension of the short-range features (which also
+        corresponds to the number of long-range features that will be returned).
+    :param output_dim: The dimension of the long-range features that will be returned.
+
     """
 
     def __init__(
         self,
         hypers: LongRangeHypers,
-        feature_dim: int,
         neighbor_list_options: NeighborListOptions,
+        feature_dim: int,
+        output_dim: int,
     ) -> None:
         super(LongRangeFeaturizer, self).__init__()
 
         try:
             from torchpme import (
-                Calculator,
                 CoulombPotential,
                 EwaldCalculator,
                 P3MCalculator,
@@ -84,31 +88,22 @@ class LongRangeFeaturizer(torch.nn.Module):
         """If ``True``, use the Ewald summation method instead of the P3M method for
         periodic systems during training."""
 
-        self.direct_calculator = Calculator(
-            potential=CoulombPotential(
-                smearing=None,
-                exclusion_radius=neighbor_list_options.cutoff,
-            ),
-            full_neighbor_list=False,  # see docs of torch.combinations
-        )
-        """Calculator for the electrostatic potential in non-periodic systems."""
-
-        self.neighbor_list_options = neighbor_list_options
-        """Neighbor list information for the short-range model."""
-
         self.charges_map = torch.nn.Linear(feature_dim, feature_dim)
         """Map the short-range features to atomic charges."""
 
         self.out_projection = torch.nn.Sequential(
             torch.nn.Linear(feature_dim, feature_dim),
             torch.nn.SiLU(),
-            torch.nn.Linear(feature_dim, feature_dim),
+            torch.nn.Linear(feature_dim, output_dim),
         )
 
     def forward(
         self,
-        systems: list[System],
-        features: torch.Tensor,
+        systems: List[System],
+        node_features: torch.Tensor,
+        centers: torch.Tensor,
+        neighbors: torch.Tensor,
+        system_indices: torch.Tensor,
         neighbor_distances: torch.Tensor,
     ) -> torch.Tensor:
         """Compute the long-range features for a list of systems.
@@ -116,83 +111,62 @@ class LongRangeFeaturizer(torch.nn.Module):
         :param systems: A list of :py:class:`System` objects for which to compute the
             long-range features. Each system must contain a neighbor list consistent
             with the neighbor list options used to create the class.
-        :param features: A tensor of short-range features for the systems.
+        :param node_features: A tensor of short-range node features for the systems.
+        :param centers: A tensor of center atom indices for the neighbor list edges.
+        :param neighbors: A tensor of neighbor atom indices for the neighbor list edges.
+        :param system_indices: A tensor of the system index for each atom in the batch
         :param neighbor_distances: A tensor of neighbor distances for the systems,
             which must be consistent with the neighbor list options used to create the
             class.
         :return: A tensor of long-range features for the systems.
         """
-        charges = self.charges_map(features)
+        charges = self.charges_map(node_features)
+        neighbor_indices = torch.stack([centers, neighbors], dim=-1)
 
-        last_len_nodes = 0
-        last_len_edges = 0
-        long_range_features = []
+        positions_list: List[torch.Tensor] = []
+        cells_list: List[torch.Tensor] = []
+        pbc_list: List[torch.Tensor] = []
         for system in systems:
-            system_charges = charges[last_len_nodes : last_len_nodes + len(system)]
-            last_len_nodes += len(system)
+            if system.pbc.sum() == 1:
+                raise NotImplementedError(
+                    "Long-range featurizer does not support 1D systems."
+                )
+            positions_list.append(system.positions)
+            n_periodic = system.pbc.sum().item()
+            cell = system.cell
+            if n_periodic == 2:
+                cell = fill_2d_vacuum(cell, system.pbc, system.positions)
+            cells_list.append(cell)
+            pbc_list.append(system.pbc)
 
-            neighbor_list = system.get_neighbor_list(self.neighbor_list_options)
-            neighbor_indices_system = torch.stack(
-                [
-                    neighbor_list.samples.column("first_atom"),
-                    neighbor_list.samples.column("second_atom"),
-                ],
-                dim=-1,
+        positions = torch.concatenate(positions_list)
+        pbc = torch.stack(pbc_list)
+        cells = torch.stack(cells_list)
+
+        if self.use_ewald and self.training:
+            potential = self.ewald_calculator.forward(
+                charges=charges,
+                cell=cells,
+                positions=positions,
+                neighbor_indices=neighbor_indices,
+                neighbor_distances=neighbor_distances,
+                system_index=system_indices,
+                periodic=pbc,
+            )
+        else:
+            potential = self.p3m_calculator.forward(
+                charges=charges,
+                cell=cells,
+                positions=positions,
+                neighbor_indices=neighbor_indices,
+                neighbor_distances=neighbor_distances,
+                system_index=system_indices,
+                periodic=pbc,
             )
 
-            neighbor_distances_system = neighbor_distances[
-                last_len_edges : last_len_edges + len(neighbor_indices_system)
-            ]
-            last_len_edges += len(neighbor_indices_system)
+        long_range_features = self.out_projection(potential)
 
-            if system.pbc.any():
-                if system.pbc.sum() == 1:
-                    raise NotImplementedError(
-                        "Long-range featurizer does not support 1D systems."
-                    )
-                if self.use_ewald and self.training:  # use Ewald for training only
-                    potential = self.ewald_calculator.forward(
-                        charges=system_charges,
-                        cell=system.cell,
-                        positions=system.positions,
-                        neighbor_indices=neighbor_indices_system,
-                        neighbor_distances=neighbor_distances_system,
-                        periodic=system.pbc,
-                    )
-                else:
-                    potential = self.p3m_calculator.forward(
-                        charges=system_charges,
-                        cell=system.cell,
-                        positions=system.positions,
-                        neighbor_indices=neighbor_indices_system,
-                        neighbor_distances=neighbor_distances_system,
-                        periodic=system.pbc,
-                    )
-            else:  # non-periodic
-                # compute the distance between all pairs of atoms
-                neighbor_indices_system = torch.combinations(
-                    torch.arange(len(system), device=system.positions.device), 2
-                )
-                neighbor_distances_system = torch.sqrt(
-                    torch.sum(
-                        (
-                            system.positions[neighbor_indices_system[:, 1]]
-                            - system.positions[neighbor_indices_system[:, 0]]
-                        )
-                        ** 2,
-                        dim=1,
-                    )
-                )
-                potential = self.direct_calculator.forward(
-                    charges=system_charges,
-                    cell=system.cell,
-                    positions=system.positions,
-                    neighbor_indices=neighbor_indices_system,
-                    neighbor_distances=neighbor_distances_system,
-                )
-            long_range_features.append(self.out_projection(potential))
-
-        return torch.concatenate(long_range_features)
+        return long_range_features
 
 
 class DummyLongRangeFeaturizer(torch.nn.Module):
@@ -208,3 +182,48 @@ class DummyLongRangeFeaturizer(torch.nn.Module):
         neighbor_distances: torch.Tensor,
     ) -> torch.Tensor:
         return torch.tensor(0)
+
+
+def fill_2d_vacuum(
+    cell: torch.Tensor,
+    periodic: torch.Tensor,
+    positions: torch.Tensor,
+    gap_factor: float = 1.5,
+) -> torch.Tensor:
+    """
+    Synthesize the non-periodic lattice vector of a 2D slab cell.
+
+    Some interfaces (notably :class:`metatomic.torch.System`) require the lattice
+    vector along a non-periodic direction to be zero, which makes the cell singular.
+    The Ewald slab calculation needs a non-singular cell, so this fills the missing
+    vector with ``(thickness + gap_factor * L_max)`` along the plane normal -- the same
+    effective height that :func:`shrink_2d_cell` would shrink a large vacuum down to,
+    so the residual interaction between periodic images is negligible.
+
+    For structures that are not 2D-periodic the cell is returned unchanged.
+
+    :param cell: torch.tensor of shape ``(3, 3)`` with the lattice vectors as rows; the
+        non-periodic row is expected to be (close to) zero.
+    :param periodic: torch.tensor of shape ``(3,)`` and dtype bool.
+    :param positions: torch.tensor of shape ``(N, 3)`` with the atomic positions.
+    :param gap_factor: multiple of the longer in-plane lattice vector to use as the
+        vacuum gap.
+
+    :return: the cell of shape ``(3, 3)`` with the non-periodic vector filled in.
+    """
+    if int(periodic.to(torch.int64).sum()) != 2:
+        return cell
+
+    axis = int(torch.argmax((~periodic).to(torch.int64)))
+    v1, v2 = cell[(axis + 1) % 3], cell[(axis + 2) % 3]
+    normal = torch.linalg.cross(v1, v2)
+    normal = normal / torch.linalg.norm(normal).clamp(min=1e-15)
+
+    projection = positions @ normal
+    thickness = projection.max() - projection.min()
+    length_max = torch.maximum(torch.linalg.norm(v1), torch.linalg.norm(v2))
+    height = thickness + gap_factor * length_max
+
+    cell = cell.clone()
+    cell[axis] = height * normal
+    return cell

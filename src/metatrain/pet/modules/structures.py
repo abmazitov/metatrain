@@ -130,6 +130,8 @@ def systems_to_batch(
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
     Labels,
     torch.Tensor,
     torch.Tensor,
@@ -152,6 +154,8 @@ def systems_to_batch(
         root finder on the smoothed neighbor count.
     :return: A tuple containing the batch tensors.
         The batch consists of the following tensors:
+        - `centers`: The indices of the central atoms in the batch
+        - `neighbors`: The indices of the neighboring atoms in the batch
         - `element_indices_nodes`: The atomic species of the central atoms
         - `element_indices_neighbors`: The atomic species of the neighboring atoms
         - `edge_vectors`: The cartesian edge vectors between the central atoms and their
@@ -307,6 +311,8 @@ def systems_to_batch(
     )
 
     return (
+        centers,
+        neighbors,
         element_indices_nodes,
         element_indices_neighbors,
         edge_vectors,

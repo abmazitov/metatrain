@@ -178,6 +178,7 @@ class FlashMD(ModelInterface[ModelHypers]):
             self.long_range_featurizer = LongRangeFeaturizer(
                 hypers=self.hypers["long_range"],
                 feature_dim=self.d_pet,
+                output_dim=self.d_pet,
                 neighbor_list_options=self.requested_nl,
             )
         else:

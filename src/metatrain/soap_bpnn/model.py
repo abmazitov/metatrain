@@ -334,6 +334,7 @@ class SoapBpnn(ModelInterface[ModelHypers]):
             self.long_range_featurizer = LongRangeFeaturizer(
                 self.hypers["long_range"],
                 self.n_inputs_last_layer,
+                self.n_inputs_last_layer,
                 self.requested_nl,
             )
         else:

@@ -203,8 +203,9 @@ class PET(ModelInterface[ModelHypers]):
                 )
             self.long_range_featurizer = LongRangeFeaturizer(
                 hypers=self.hypers["long_range"],
-                feature_dim=self.d_node,
                 neighbor_list_options=self.requested_nl,
+                feature_dim=self.d_node,
+                output_dim=1,
             )
         else:
             self.long_range = False
@@ -430,6 +431,8 @@ class PET(ModelInterface[ModelHypers]):
         with torch.profiler.record_function("PET::systems_to_batch"):
             # **Stage 0: Input Preparation**
             (
+                centers,
+                neighbors,
                 element_indices_nodes,
                 element_indices_neighbors,
                 edge_vectors,
@@ -486,13 +489,16 @@ class PET(ModelInterface[ModelHypers]):
             # on top of the node features
 
             if self.long_range:
-                long_range_features = self._calculate_long_range_features(
-                    systems, node_features_list, edge_distances, padding_mask
-                )
-                for i in range(self.num_readout_layers):
-                    node_features_list[i] = (
-                        node_features_list[i] + long_range_features
-                    ) * 0.5**0.5
+                with torch.profiler.record_function("PET::_calculate_lr_features"):
+                    long_range_features = self._calculate_long_range_features(
+                        systems,
+                        node_features_list,
+                        centers,
+                        neighbors,
+                        system_indices,
+                        edge_distances,
+                        padding_mask,
+                    )
 
         # **Stage 2: Intermediate Feature Output (Optional)**
         with torch.profiler.record_function("PET::_get_output_features"):
@@ -551,6 +557,22 @@ class PET(ModelInterface[ModelHypers]):
                 outputs,
                 selected_atoms,
             )
+
+            if self.long_range:
+                lr_atomic_predictions_dict = (
+                    self._get_output_long_range_atomic_predictions(
+                        long_range_features,
+                        system_indices,
+                        sample_labels,
+                        outputs,
+                        selected_atoms,
+                    )
+                )
+                for k, v in atomic_predictions_dict.items():
+                    if k in lr_atomic_predictions_dict:
+                        atomic_predictions_dict[k] = mts.add(
+                            v, lr_atomic_predictions_dict[k]
+                        )
 
             for k, v in atomic_predictions_dict.items():
                 return_dict[k] = v
@@ -765,6 +787,9 @@ class PET(ModelInterface[ModelHypers]):
         self,
         systems: List[System],
         node_features_list: List[torch.Tensor],
+        centers: torch.Tensor,
+        neighbors: torch.Tensor,
+        system_indices: torch.Tensor,
         edge_distances: torch.Tensor,
         padding_mask: torch.Tensor,
     ) -> torch.Tensor:
@@ -774,6 +799,9 @@ class PET(ModelInterface[ModelHypers]):
 
         :param systems: List of `metatomic.torch.System` objects to process.
         :param node_features_list: List of node feature tensors from each GNN layer.
+        :param centers: Tensor of central atom indices [n_atoms].
+        :param neighbors: Tensor of neighbor atom indices [n_atoms, max_num_neighbors].
+        :param system_indices: Tensor of system indices for each atom [n_atoms].
         :param edge_distances: Tensor of edge distances [n_atoms, max_num_neighbors].
         :param padding_mask: Boolean mask indicating real vs padded neighbors
             [n_atoms, max_num_neighbors].
@@ -785,12 +813,17 @@ class PET(ModelInterface[ModelHypers]):
             # EwaldCalculator. We will use the EwaldCalculator for training.
             self.long_range_featurizer.use_ewald = True
         flattened_lengths = edge_distances[padding_mask]
-        short_range_features = (
+        short_range_node_features = (
             torch.stack(node_features_list).sum(dim=0)
             * (1 / len(node_features_list)) ** 0.5
         )
         long_range_features = self.long_range_featurizer(
-            systems, short_range_features, flattened_lengths
+            systems,
+            short_range_node_features,
+            centers,
+            neighbors,
+            system_indices,
+            flattened_lengths,
         )
         return long_range_features
 
@@ -1215,6 +1248,70 @@ class PET(ModelInterface[ModelHypers]):
                 )
 
         return atomic_predictions_tmap_dict
+
+    def _get_output_long_range_atomic_predictions(
+        self,
+        long_range_atomic_predictions: torch.Tensor,
+        system_indices: torch.Tensor,
+        sample_labels: Labels,
+        outputs: Dict[str, ModelOutput],
+        selected_atoms: Optional[Labels],
+    ) -> Dict[str, TensorMap]:
+        """
+        Combine long-range atomic predictions into final TensorMaps.
+        Only works with `energy`-type outputs.
+
+        :param long_range_atomic_predictions: Tensor of long-range atomic predictions
+            [n_atoms, d_pet].
+        :param system_indices: Tensor mapping each atom to its system index
+            [n_atoms].
+        :param sample_labels: Labels for all atoms in the batch [n_atoms, 2].
+        :param outputs: Dictionary of requested outputs.
+        :param selected_atoms: Optional Labels specifying a subset of atoms to include.
+        :return: Dictionary mapping requested output names to TensorMaps of
+            long-range predictions, either per-atom or summed over atoms.
+        """
+        lr_atomic_predictions_tmap_dict: Dict[str, TensorMap] = {}
+        for output_name in self.target_names:
+            if "energy" in output_name and output_name in outputs:
+                blocks = [
+                    TensorBlock(
+                        values=long_range_atomic_predictions,
+                        samples=sample_labels,
+                        components=components,
+                        properties=properties,
+                    )
+                    for key, shape, components, properties in zip(
+                        self.output_shapes[output_name].keys(),
+                        self.output_shapes[output_name].values(),
+                        self.component_labels[output_name],
+                        self.property_labels[output_name],
+                        strict=True,
+                    )
+                ]
+                lr_atomic_predictions_tmap_dict[output_name] = TensorMap(
+                    keys=self.key_labels[output_name],
+                    blocks=blocks,
+                )
+
+            if selected_atoms is not None:
+                for output_name, tmap in lr_atomic_predictions_tmap_dict.items():
+                    lr_atomic_predictions_tmap_dict[output_name] = mts.slice(
+                        tmap, axis="samples", selection=selected_atoms
+                    )
+
+            # If per-atom predictions are requested, we return the atomic predictions
+            # tensor maps. Otherwise, we sum the atomic predictions over the atoms
+            # to get the final per-structure predictions for each requested output.
+
+            for output_name, atomic_property in lr_atomic_predictions_tmap_dict.items():
+                if outputs[output_name].sample_kind == "atom":
+                    lr_atomic_predictions_tmap_dict[output_name] = atomic_property
+                else:
+                    lr_atomic_predictions_tmap_dict[output_name] = sum_over_atoms(
+                        atomic_property
+                    )
+        return lr_atomic_predictions_tmap_dict
 
     @classmethod
     def load_checkpoint(
