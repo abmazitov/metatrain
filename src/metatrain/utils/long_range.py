@@ -177,8 +177,11 @@ class DummyLongRangeFeaturizer(torch.nn.Module):
 
     def forward(
         self,
-        systems: list[System],
-        features: torch.Tensor,
+        systems: List[System],
+        node_features: torch.Tensor,
+        centers: torch.Tensor,
+        neighbors: torch.Tensor,
+        system_indices: torch.Tensor,
         neighbor_distances: torch.Tensor,
     ) -> torch.Tensor:
         return torch.tensor(0)

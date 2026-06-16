@@ -421,6 +421,12 @@ class PET(ModelInterface[ModelHypers]):
             predictions (depending on the ModelOutput configuration) with appropriate
             metatensor metadata (samples, components, properties).
         """
+        if self.long_range and selected_atoms is not None:
+            raise NotImplementedError(
+                "The long-range featurizer does not currently support selecting a "
+                "subset of atoms. Please set `selected_atoms=None` when using the "
+                "long-range featurizer."
+            )
         device = systems[0].device
         return_dict: Dict[str, TensorMap] = {}
         nl_options = self.requested_neighbor_lists()[0]
@@ -499,6 +505,8 @@ class PET(ModelInterface[ModelHypers]):
                         edge_distances,
                         padding_mask,
                     )
+            else:
+                long_range_features = torch.tensor(0)
 
         # **Stage 2: Intermediate Feature Output (Optional)**
         with torch.profiler.record_function("PET::_get_output_features"):
