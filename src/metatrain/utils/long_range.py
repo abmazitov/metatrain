@@ -1,13 +1,22 @@
 # mypy: disable-error-code=misc
 # We ignore misc errors in this file because TypedDict
 # with default values is not allowed by mypy.
-from typing import List
+from typing import List, Optional
 
 import torch
 from metatomic.torch import System
 from typing_extensions import TypedDict
 
 from metatrain.utils.neighbor_lists import NeighborListOptions
+
+try:
+    from torchpme.lib import generate_kvectors_for_ewald, lr_wavelength_for_num_k
+except ImportError:
+    # torch-pme is an optional dependency, only required when long-range interactions
+    # are enabled. These names are referenced by ``_capped_batched_kvectors`` below,
+    # which only runs when ``num_k > 0`` (i.e. when torch-pme is installed and the
+    # Ewald calculator has been constructed).
+    pass
 
 
 class LongRangeHypers(TypedDict):
@@ -25,6 +34,14 @@ class LongRangeHypers(TypedDict):
     """Resolution of the reciprocal space grid"""
     interpolation_nodes: int = 5
     """Number of grid points for interpolation (for P3M/PME only)"""
+    num_k: int = 3000
+    """Target number of half-space reciprocal-space vectors per structure for the
+    batched Ewald sum (training only). When ``> 0``, the per-structure k-vector count is
+    capped at this value (and half-space summation is enabled), which bounds the memory
+    of batches that mix very differently sized cells -- the regime in which a fixed
+    ``kspace_resolution`` lets the largest cell in the batch dictate (and inflate) the
+    padded k-vector count for every structure. ``0`` keeps the original
+    behavior of deriving the k-vectors from ``kspace_resolution`` alone."""
 
 
 class LongRangeFeaturizer(torch.nn.Module):
@@ -61,6 +78,14 @@ class LongRangeFeaturizer(torch.nn.Module):
                 "Please install it with `pip install 'torch-pme>=0.3.2'`."
             )
 
+        self.num_k = int(hypers["num_k"])
+        """Cap on the per-structure half-space k-vector count for the batched Ewald sum
+        (``0`` disables the cap). See :class:`LongRangeHypers`."""
+
+        self.kspace_resolution = float(hypers["kspace_resolution"])
+        """Reciprocal-space resolution used as the (finest) floor when capping the
+        k-vector count with :attr:`num_k`."""
+
         self.ewald_calculator = EwaldCalculator(
             potential=CoulombPotential(
                 smearing=float(hypers["smearing"]),
@@ -68,9 +93,12 @@ class LongRangeFeaturizer(torch.nn.Module):
             ),
             full_neighbor_list=neighbor_list_options.full_list,
             lr_wavelength=float(hypers["kspace_resolution"]),
+            halfspace=self.num_k > 0,
         )
         """Calculator to compute the long-range electrostatic potential using the Ewald
-        summation method."""
+        summation method. When :attr:`num_k` is set, it is constructed with
+        ``halfspace=True`` and fed explicit, count-capped k-vectors at evaluation
+        time."""
 
         self.p3m_calculator = P3MCalculator(
             potential=CoulombPotential(
@@ -144,6 +172,16 @@ class LongRangeFeaturizer(torch.nn.Module):
         cells = torch.stack(cells_list)
 
         if self.use_ewald and self.training:
+            # When ``num_k`` is set, generate explicit per-structure k-vectors whose
+            # count is capped at ``num_k`` (reusing the shared, fixed neighbor list
+            # unchanged); otherwise let the calculator derive them from its
+            # ``lr_wavelength``. Capping bounds the padded k-dimension -- and hence the
+            # reciprocal-space memory -- on batches with heterogeneous cell sizes.
+            kvectors: Optional[torch.Tensor] = None
+            if self.num_k > 0:
+                kvectors = _capped_batched_kvectors(
+                    cells, pbc, self.num_k, self.kspace_resolution
+                )
             potential = self.ewald_calculator.forward(
                 charges=charges,
                 cell=cells,
@@ -152,6 +190,7 @@ class LongRangeFeaturizer(torch.nn.Module):
                 neighbor_distances=neighbor_distances,
                 system_index=system_indices,
                 periodic=pbc,
+                kvectors=kvectors,
             )
         else:
             potential = self.p3m_calculator.forward(
@@ -185,6 +224,56 @@ class DummyLongRangeFeaturizer(torch.nn.Module):
         neighbor_distances: torch.Tensor,
     ) -> torch.Tensor:
         return torch.tensor(0)
+
+
+def _capped_batched_kvectors(
+    cells: torch.Tensor,
+    periodic: torch.Tensor,
+    num_k: int,
+    kspace_resolution: float,
+) -> torch.Tensor:
+    """Generate zero-padded per-structure Ewald k-vectors with a capped count.
+
+    For each structure the reciprocal-space resolution is the *coarser* of the
+    configured ``kspace_resolution`` and the resolution that would yield ``num_k``
+    half-space k-vectors for that cell (:func:`lr_wavelength_for_num_k`). Taking the
+    coarser of the two means small and medium cells keep the configured resolution
+    exactly, while only the cells large enough to exceed ``num_k`` vectors are coarsened
+    down to ``num_k``. This bounds the padded k-dimension -- and hence the memory of the
+    batched reciprocal-space sum -- to roughly ``num_k`` regardless of how different the
+    cell sizes in the batch are.
+
+    The smearing is intentionally *not* adjusted per structure: it is fixed by the
+    calculator and must stay consistent with the fixed real-space cutoff of the shared
+    neighbor list. As a consequence ``num_k`` must be chosen large enough that the
+    largest cells remain converged at that smearing, otherwise their reciprocal-space
+    accuracy degrades (the smaller cells, kept at ``kspace_resolution``, are unaffected).
+
+    Non-periodic (0D) structures get a single zero k-vector; their reciprocal-space
+    contribution is masked out by the calculator.
+
+    :param cells: tensor of shape ``(B, 3, 3)`` with the per-structure lattice vectors.
+    :param periodic: bool tensor of shape ``(B, 3)`` with the per-direction periodicity.
+    :param num_k: target/cap on the number of half-space k-vectors per structure.
+    :param kspace_resolution: reciprocal-space resolution used as the finest floor.
+
+    :return: tensor of shape ``(B, max_k, 3)`` of zero-padded k-vectors.
+    """
+    all_kvectors: List[torch.Tensor] = []
+    for index in range(cells.shape[0]):
+        cell = cells[index]
+        if not bool(torch.any(periodic[index])):
+            all_kvectors.append(
+                torch.zeros((1, 3), dtype=cell.dtype, device=cell.device)
+            )
+            continue
+        lr_num_k = lr_wavelength_for_num_k(cell, num_k)
+        lr_eff = lr_num_k if lr_num_k > kspace_resolution else kspace_resolution
+        ns = torch.ceil(torch.linalg.norm(cell, dim=-1) / lr_eff).long()
+        all_kvectors.append(
+            generate_kvectors_for_ewald(cell=cell, ns=ns, halfspace=True)
+        )
+    return torch.nn.utils.rnn.pad_sequence(all_kvectors, batch_first=True)
 
 
 def fill_2d_vacuum(
