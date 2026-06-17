@@ -1,7 +1,7 @@
 # mypy: disable-error-code=misc
 # We ignore misc errors in this file because TypedDict
 # with default values is not allowed by mypy.
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import torch
 from metatomic.torch import System
@@ -34,7 +34,7 @@ class LongRangeHypers(TypedDict):
     """Resolution of the reciprocal space grid"""
     interpolation_nodes: int = 5
     """Number of grid points for interpolation (for P3M/PME only)"""
-    num_k: int = 3000
+    num_k: int = 0
     """Target number of half-space reciprocal-space vectors per structure for the
     batched Ewald sum (training only). When ``> 0``, the per-structure k-vector count is
     capped at this value (and half-space summation is enabled), which bounds the memory
@@ -175,11 +175,16 @@ class LongRangeFeaturizer(torch.nn.Module):
             # When ``num_k`` is set, generate explicit per-structure k-vectors whose
             # count is capped at ``num_k`` (reusing the shared, fixed neighbor list
             # unchanged); otherwise let the calculator derive them from its
-            # ``lr_wavelength``. Capping bounds the padded k-dimension -- and hence the
-            # reciprocal-space memory -- on batches with heterogeneous cell sizes.
+            # ``lr_wavelength``. The k-vectors of all structures are concatenated
+            # (ragged) into a single ``(total_k, 3)`` array with ``k_to_system`` mapping
+            # each k-vector to its structure, so the reciprocal-space memory scales with
+            # the *sum* of the per-structure k-vector counts (capped at ``num_k`` each)
+            # rather than with the batch-wide maximum -- the key saving on batches with
+            # heterogeneous cell sizes.
             kvectors: Optional[torch.Tensor] = None
+            k_to_system: Optional[torch.Tensor] = None
             if self.num_k > 0:
-                kvectors = _capped_batched_kvectors(
+                kvectors, k_to_system = _capped_batched_kvectors(
                     cells, pbc, self.num_k, self.kspace_resolution
                 )
             potential = self.ewald_calculator.forward(
@@ -191,6 +196,7 @@ class LongRangeFeaturizer(torch.nn.Module):
                 system_index=system_indices,
                 periodic=pbc,
                 kvectors=kvectors,
+                k_to_system=k_to_system,
             )
         else:
             potential = self.p3m_calculator.forward(
@@ -231,23 +237,30 @@ def _capped_batched_kvectors(
     periodic: torch.Tensor,
     num_k: int,
     kspace_resolution: float,
-) -> torch.Tensor:
-    """Generate zero-padded per-structure Ewald k-vectors with a capped count.
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Generate concatenated (ragged) per-structure Ewald k-vectors with a capped count.
 
     For each structure the reciprocal-space resolution is the *coarser* of the
     configured ``kspace_resolution`` and the resolution that would yield ``num_k``
     half-space k-vectors for that cell (:func:`lr_wavelength_for_num_k`). Taking the
     coarser of the two means small and medium cells keep the configured resolution
     exactly, while only the cells large enough to exceed ``num_k`` vectors are coarsened
-    down to ``num_k``. This bounds the padded k-dimension -- and hence the memory of the
-    batched reciprocal-space sum -- to roughly ``num_k`` regardless of how different the
-    cell sizes in the batch are.
+    down to ``num_k``. This bounds the per-structure k-vector count -- and hence the
+    memory of the batched reciprocal-space sum, which scales with the *sum* of the
+    per-structure k-vector counts -- to roughly ``num_k`` per structure regardless of
+    how different the cell sizes in the batch are.
+
+    The k-vectors of all structures are *concatenated* along a single dimension (no
+    padding to the batch-wide maximum) and returned together with a ``k_to_system``
+    index that maps each k-vector to its structure, matching the flat layout expected by
+    :class:`torchpme.EwaldCalculator`.
 
     The smearing is intentionally *not* adjusted per structure: it is fixed by the
     calculator and must stay consistent with the fixed real-space cutoff of the shared
     neighbor list. As a consequence ``num_k`` must be chosen large enough that the
     largest cells remain converged at that smearing, otherwise their reciprocal-space
-    accuracy degrades (the smaller cells, kept at ``kspace_resolution``, are unaffected).
+    accuracy degrades (the smaller cells, kept at ``kspace_resolution``, are
+    unaffected).
 
     Non-periodic (0D) structures get a single zero k-vector; their reciprocal-space
     contribution is masked out by the calculator.
@@ -257,23 +270,27 @@ def _capped_batched_kvectors(
     :param num_k: target/cap on the number of half-space k-vectors per structure.
     :param kspace_resolution: reciprocal-space resolution used as the finest floor.
 
-    :return: tensor of shape ``(B, max_k, 3)`` of zero-padded k-vectors.
+    :return: a tuple ``(kvectors, k_to_system)`` where ``kvectors`` has shape
+        ``(total_k, 3)`` and ``k_to_system`` has shape ``(total_k,)`` and dtype int64.
     """
     all_kvectors: List[torch.Tensor] = []
+    k_to_system: List[torch.Tensor] = []
     for index in range(cells.shape[0]):
         cell = cells[index]
         if not bool(torch.any(periodic[index])):
-            all_kvectors.append(
-                torch.zeros((1, 3), dtype=cell.dtype, device=cell.device)
+            kvectors = torch.zeros((1, 3), dtype=cell.dtype, device=cell.device)
+        else:
+            lr_num_k = lr_wavelength_for_num_k(cell, num_k)
+            lr_eff = lr_num_k if lr_num_k > kspace_resolution else kspace_resolution
+            ns = torch.ceil(torch.linalg.norm(cell, dim=-1) / lr_eff).long()
+            kvectors = generate_kvectors_for_ewald(cell=cell, ns=ns, halfspace=True)
+        all_kvectors.append(kvectors)
+        k_to_system.append(
+            torch.full(
+                (kvectors.shape[0],), index, dtype=torch.long, device=cell.device
             )
-            continue
-        lr_num_k = lr_wavelength_for_num_k(cell, num_k)
-        lr_eff = lr_num_k if lr_num_k > kspace_resolution else kspace_resolution
-        ns = torch.ceil(torch.linalg.norm(cell, dim=-1) / lr_eff).long()
-        all_kvectors.append(
-            generate_kvectors_for_ewald(cell=cell, ns=ns, halfspace=True)
         )
-    return torch.nn.utils.rnn.pad_sequence(all_kvectors, batch_first=True)
+    return torch.cat(all_kvectors, dim=0), torch.cat(k_to_system, dim=0)
 
 
 def fill_2d_vacuum(
