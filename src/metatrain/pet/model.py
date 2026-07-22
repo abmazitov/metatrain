@@ -24,7 +24,6 @@ from metatrain.utils.data.atomic_basis_helpers import (
     sparsify_atomic_basis_target,
 )
 from metatrain.utils.dtype import dtype_to_str
-from metatrain.utils.finetuning import apply_finetuning_strategy
 from metatrain.utils.long_range import DummyLongRangeFeaturizer, LongRangeFeaturizer
 from metatrain.utils.metadata import merge_metadata
 from metatrain.utils.scaler import Scaler
@@ -40,6 +39,7 @@ from .modules.diagnostic import (
     prepare_diagnostic_handles,
     standardize_featurizer_input_tensor,
 )
+from .modules.finetuning import apply_finetuning_strategy, compute_stale_targets
 from .modules.structures import concatenate_structures, get_pair_sample_labels
 
 
@@ -89,10 +89,11 @@ class PET(ModelInterface[ModelHypers]):
         self.featurizer_type = self.hypers["featurizer_type"]
 
         self.atomic_types = dataset_info.atomic_types
+        nl_is_strict = bool(self.hypers["long_range"]["enable"])
         self.requested_nl = NeighborListOptions(
             cutoff=self.cutoff,
             full_list=True,
-            strict=True,
+            strict=nl_is_strict,
         )
         if self.featurizer_type not in AVAILABLE_FEATURIZERS:
             raise ValueError(
@@ -204,7 +205,9 @@ class PET(ModelInterface[ModelHypers]):
     def supported_outputs(self) -> Dict[str, ModelOutput]:
         return self.outputs
 
-    def restart(self, dataset_info: DatasetInfo) -> "PET":
+    def restart(
+        self, dataset_info: DatasetInfo, finetune_method: Optional[str] = None
+    ) -> "PET":
         # merge old and new dataset info
         merged_info = self.dataset_info.union(dataset_info)
         new_atomic_types = [
@@ -216,6 +219,13 @@ class PET(ModelInterface[ModelHypers]):
             if key not in self.dataset_info.targets
         }
         self.has_new_targets = len(new_targets) > 0
+
+        # Targets that were present before this run but are not part of the current
+        # run's dataset: with a backbone-altering finetuning method (full/lora), their
+        # heads are no longer meaningful and are dropped below.
+        stale_targets = compute_stale_targets(
+            self.dataset_info.targets, dataset_info.targets
+        )
 
         if len(new_atomic_types) > 0:
             raise ValueError(
@@ -247,6 +257,13 @@ class PET(ModelInterface[ModelHypers]):
             ),
         )
         self.scaler = self.scaler.restart(train_dataset_info)
+
+        # Actual removal is deferred to ``apply_finetuning_strategy`` (called later,
+        # once training starts), since ``inherit_heads`` needs these stale targets'
+        # heads to still be around to copy weights from.
+        self._stale_finetune_targets = (
+            stale_targets if finetune_method in ("full", "lora") else []
+        )
 
         return self
 
@@ -950,8 +967,14 @@ class PET(ModelInterface[ModelHypers]):
 
         finetune_config = model_state_dict.pop("finetune_config", {})
         if finetune_config:
-            # Apply the finetuning strategy
-            model = apply_finetuning_strategy(model, finetune_config)
+            # Re-apply the finetuning strategy to restore the trainable/frozen
+            # parameter state (and LoRA layers, if any). ``inherit_heads`` is
+            # skipped here: it is a one-time weight-copy initialization step that
+            # already ran when finetuning first started, and by now its source
+            # target may have been pruned as stale.
+            model = apply_finetuning_strategy(
+                model, finetune_config, apply_inherit_heads=False
+            )
         state_dict_iter = iter(model_state_dict.values())
         next(state_dict_iter)  # skip the species_to_species_index
         dtype = next(state_dict_iter).dtype
@@ -1060,6 +1083,24 @@ class PET(ModelInterface[ModelHypers]):
         self.property_labels[target_name] = [
             block.properties for block in target_info.layout.blocks()
         ]
+
+    def remove_output(self, target_name: str) -> None:
+        """
+        Remove a previously registered output target, mirroring ``_add_output``.
+
+        Used to drop targets whose heads are no longer meaningful after a
+        backbone-altering fine-tuning run (``full``/``lora``).
+
+        :param target_name: Name of the target to remove.
+        """
+        self.output_shapes.pop(target_name, None)
+        self.outputs.pop(target_name, None)
+        self.outputs.pop(get_last_layer_features_name(target_name), None)
+        self.backend.remove_output(target_name)
+        self.last_layer_parameter_names.pop(target_name, None)
+        self.key_labels.pop(target_name, None)
+        self.component_labels.pop(target_name, None)
+        self.property_labels.pop(target_name, None)
 
     def _move_labels_to_device(self, device: torch.device) -> None:
         self.single_label = self.single_label.to(device)

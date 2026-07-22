@@ -35,6 +35,7 @@ class PETBackend(torch.nn.Module):
         super().__init__()
 
         # Cache frequently accessed hyperparameters
+        self.nl_is_strict = bool(hypers["long_range"]["enable"])
         self.cutoff = float(hypers["cutoff"])
         self.cutoff_function = hypers["cutoff_function"]
         self.cutoff_width = float(hypers["cutoff_width"])
@@ -215,6 +216,25 @@ class PETBackend(torch.nn.Module):
             ]
         )
 
+    def remove_output(self, target_name: str) -> None:
+        """
+        Remove the node/edge heads and last layers for a previously registered output
+        target, mirroring :meth:`add_output`.
+
+        ``torch.nn.ModuleDict.pop`` has no ``default`` argument, so presence is
+        checked explicitly before deleting.
+
+        :param target_name: Name of the target to remove.
+        """
+        if target_name in self.node_heads:
+            del self.node_heads[target_name]
+        if target_name in self.edge_heads:
+            del self.edge_heads[target_name]
+        if target_name in self.node_last_layers:
+            del self.node_last_layers[target_name]
+        if target_name in self.edge_last_layers:
+            del self.edge_last_layers[target_name]
+
     def preprocess(
         self,
         positions: torch.Tensor,
@@ -302,6 +322,7 @@ class PETBackend(torch.nn.Module):
             self.num_neighbors_adaptive,
             self.adaptive_cutoff_method,
             cutoff_width_adaptive,
+            self.nl_is_strict,
         )
 
         batch_data: Dict[str, torch.Tensor] = {

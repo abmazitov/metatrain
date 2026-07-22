@@ -135,7 +135,9 @@ class ModelInterface(torch.nn.Module, Generic[HypersType], metaclass=ABCMeta):
         """
 
     @abstractmethod
-    def restart(self, dataset_info: DatasetInfo) -> "ModelInterface":
+    def restart(
+        self, dataset_info: DatasetInfo, finetune_method: Optional[str] = None
+    ) -> "ModelInterface":
         """
         Update a model to restart training, potentially with different dataset and/or
         targets.
@@ -146,10 +148,34 @@ class ModelInterface(torch.nn.Module, Generic[HypersType], metaclass=ABCMeta):
 
         :param dataset_info: Information about the new dataset, including the targets
             that will be used for training.
+        :param finetune_method: The fine-tuning method used for this run (e.g.
+            ``"full"``, ``"lora"``, ``"heads"``), or ``None`` when this is a plain
+            restart that is not part of a fine-tuning run. Architectures that support
+            fine-tuning methods which alter the backbone (``"full"``, ``"lora"``)
+            should drop targets/heads that are not part of the current run's dataset,
+            since those heads were fit against a feature space the backbone no longer
+            produces. With ``"heads"`` (or ``None``), existing targets/heads should be
+            left untouched.
 
         :return: The updated model, or a new instance of the model, that is able to
             handle the new dataset.
         """
+
+    def remove_output(self, target_name: str) -> None:
+        """
+        Remove a previously registered output target from the model.
+
+        Used to drop targets whose heads are no longer meaningful, e.g. after a
+        backbone-altering fine-tuning run (``full``/``lora``) makes them stale.
+
+        Not every architecture supports this; the default implementation raises
+        ``NotImplementedError``.
+
+        :param target_name: Name of the target to remove.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support removing an output."
+        )
 
     @classmethod
     @abstractmethod
