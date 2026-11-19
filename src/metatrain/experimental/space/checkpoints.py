@@ -87,6 +87,20 @@ def model_update_v4_v5(checkpoint: dict) -> None:
         state_dict["_extra_state"] = {}
 
 
+def model_update_v5_v6(checkpoint: dict) -> None:
+    """
+    Update model checkpoint from version 5 to version 6.
+
+    The ``zbl: bool`` hyperparameter was replaced by ``repulsion``, which selects
+    the short-range repulsion model (``"zbl"``, ``"nlh"`` or ``None``).
+
+    :param checkpoint: The checkpoint to update.
+    """
+    model_hypers = checkpoint["model_data"]["model_hypers"]
+    if "zbl" in model_hypers:
+        model_hypers["repulsion"] = "zbl" if model_hypers.pop("zbl") else None
+
+
 #############################
 # TRAINER ###################
 #############################

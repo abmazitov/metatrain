@@ -25,7 +25,7 @@ architecture:
     krr:
       degree: 2
       num_sparse_points: 900
-    zbl: false
+    repulsion: null
   training:
     regularizer: 0.00005
     regularizer_forces: 0.001

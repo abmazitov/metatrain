@@ -20,8 +20,10 @@ from metatrain.utils.abc import (
     TrainerInterface,
     common_upgrade_checkpoint,
 )
-from metatrain.utils.additive import get_remove_additive_transform
-from metatrain.utils.additive.zbl import ZBL
+from metatrain.utils.additive import (
+    get_remove_additive_transform,
+    get_repulsion_model,
+)
 from metatrain.utils.architectures import get_default_hypers
 from metatrain.utils.augmentation import O3Augmenter
 from metatrain.utils.data import (
@@ -181,23 +183,10 @@ class Trainer(TrainerInterface[TrainerHypers, ModelHypers]):
         )
         additive_models = [composition_model]
 
-        # Adds the ZBL repulsion model if requested
-        if model_hypers["zbl"]:
-            zbl_targets = {
-                target_name: target_info
-                for target_name, target_info in model_dataset_info.targets.items()
-                if ZBL.is_valid_target(target_name, target_info)
-            }
-            additive_models.append(
-                ZBL(
-                    {},
-                    dataset_info=DatasetInfo(
-                        length_unit=model_dataset_info.length_unit,
-                        atomic_types=model_dataset_info.atomic_types,
-                        targets=zbl_targets,
-                    ),
-                )
-            )
+        # Adds the short-range repulsion model if requested
+        repulsion = get_repulsion_model(model_hypers["repulsion"], model_dataset_info)
+        if repulsion is not None:
+            additive_models.append(repulsion)
         additive_models = torch.nn.ModuleList(additive_models)
 
         # Initialize scaler

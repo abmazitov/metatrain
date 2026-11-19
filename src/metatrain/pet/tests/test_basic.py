@@ -2,7 +2,7 @@ import copy
 
 import pytest
 
-from metatrain.utils.additive import ZBL
+from metatrain.utils.additive import NLH, ZBL
 from metatrain.utils.architectures import get_default_hypers
 from metatrain.utils.testing import (
     ArchitectureTests,
@@ -34,18 +34,32 @@ class PETTests(ArchitectureTests):
 
 
 class TestInput(InputTests, PETTests):
-    def test_zbl_is_an_additive_model(
-        self, minimal_model_hypers, dataset_info, default_hypers
+    @pytest.mark.parametrize("repulsion, cls", [("zbl", ZBL), ("nlh", NLH)])
+    def test_repulsion_is_an_additive_model(
+        self, minimal_model_hypers, dataset_info, default_hypers, repulsion, cls
     ):
-        """Asking for ZBL attaches a ZBL additive model over the dataset types."""
+        """Asking for a repulsion attaches it as an additive model over the dataset
+        types."""
         hypers = copy.deepcopy(minimal_model_hypers)
-        hypers["zbl"] = True
+        hypers["repulsion"] = repulsion
         trainer = self.trainer_cls(default_hypers["training"])
         model = trainer.setup(hypers, dataset_info)
 
-        zbl_models = [m for m in model.additive_models if isinstance(m, ZBL)]
-        assert len(zbl_models) == 1
-        assert zbl_models[0].dataset_info.atomic_types == dataset_info.atomic_types
+        repulsion_models = [
+            m for m in model.additive_models if isinstance(m, (ZBL, NLH))
+        ]
+        assert len(repulsion_models) == 1
+        assert isinstance(repulsion_models[0], cls)
+        assert (
+            repulsion_models[0].dataset_info.atomic_types == dataset_info.atomic_types
+        )
+
+    def test_no_repulsion_by_default(
+        self, minimal_model_hypers, dataset_info, default_hypers
+    ):
+        trainer = self.trainer_cls(default_hypers["training"])
+        model = trainer.setup(minimal_model_hypers, dataset_info)
+        assert not any(isinstance(m, (ZBL, NLH)) for m in model.additive_models)
 
 
 class TestOutput(OutputTests, PETTests):

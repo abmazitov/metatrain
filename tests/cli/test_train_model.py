@@ -373,14 +373,24 @@ def test_train_single_dataset_two_forces(monkeypatch, tmp_path, options):
     train_model(options)
 
 
-def test_train_with_zbl(monkeypatch, tmp_path, options):
-    """Test that training works with a ZBL baseline."""
+@pytest.mark.parametrize("repulsion", ["zbl", "nlh"])
+def test_train_with_repulsion(monkeypatch, tmp_path, options, repulsion):
+    """Test that training works with a short-range repulsion baseline."""
     monkeypatch.chdir(tmp_path)
 
     systems_qm9 = ase.io.read(DATASET_PATH_QM9, ":")
     ase.io.write("qm9_reduced_100.xyz", systems_qm9[:50])
-    options["architecture"]["model"]["zbl"] = True
+    options["architecture"]["model"]["repulsion"] = repulsion
     train_model(options)
+
+
+def test_train_with_removed_zbl_option(monkeypatch, tmp_path, options):
+    """The removed ``zbl`` option gives a hint about its replacement."""
+    monkeypatch.chdir(tmp_path)
+    shutil.copy(DATASET_PATH_QM9, "qm9_reduced_100.xyz")
+    options["architecture"]["model"]["zbl"] = True
+    with pytest.raises(MetatrainValidationError, match="use 'repulsion: zbl' instead"):
+        train_model(options)
 
 
 def test_empty_training_set(monkeypatch, tmp_path, options):

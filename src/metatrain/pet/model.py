@@ -62,7 +62,7 @@ class PET(ModelInterface[ModelHypers]):
         targets.
     """
 
-    __checkpoint_version__ = 19
+    __checkpoint_version__ = 20
     __supported_devices__ = ["cuda", "cpu"]
     __supported_dtypes__ = [torch.float32, torch.float64]
     __default_metadata__ = ModelMetadata(
@@ -319,8 +319,8 @@ class PET(ModelInterface[ModelHypers]):
 
         1. **Scaling**: Predictions are scaled using learned or configured scale
            factors
-        2. **Additive contributions**: Composition model and optional ZBL repulsion
-           contributions are added to the predictions
+        2. **Additive contributions**: Composition model and optional short-range
+           repulsion contributions are added to the predictions
 
         :param systems: List of `metatomic.torch.System` objects to process. Each
             system should contain atomic positions, species, and cell information, with

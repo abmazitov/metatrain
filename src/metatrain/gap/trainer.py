@@ -7,8 +7,7 @@ import torch
 
 from metatrain.composition import CompositionModel, train_or_load_composition_model
 from metatrain.utils.abc import ModelInterface, TrainerInterface
-from metatrain.utils.additive import remove_additive
-from metatrain.utils.additive.zbl import ZBL
+from metatrain.utils.additive import get_repulsion_model, remove_additive
 from metatrain.utils.data import Dataset, DatasetInfo, check_datasets
 from metatrain.utils.neighbor_lists import (
     get_requested_neighbor_lists,
@@ -38,23 +37,10 @@ class Trainer(TrainerInterface[TrainerHypers, ModelHypers]):
         )
         additive_models = [composition_model]
 
-        # Adds the ZBL repulsion model if requested
-        if model_hypers["zbl"]:
-            zbl_targets = {
-                target_name: target_info
-                for target_name, target_info in dataset_info.targets.items()
-                if ZBL.is_valid_target(target_name, target_info)
-            }
-            additive_models.append(
-                ZBL(
-                    {},
-                    dataset_info=DatasetInfo(
-                        length_unit=dataset_info.length_unit,
-                        atomic_types=dataset_info.atomic_types,
-                        targets=zbl_targets,
-                    ),
-                )
-            )
+        # Adds the short-range repulsion model if requested
+        repulsion = get_repulsion_model(model_hypers["repulsion"], dataset_info)
+        if repulsion is not None:
+            additive_models.append(repulsion)
         additive_models = torch.nn.ModuleList(additive_models)
 
         return MetatrainModel(
@@ -138,7 +124,7 @@ class Trainer(TrainerInterface[TrainerHypers, ModelHypers]):
                 # and doesn't require to reassign the system to the dataset:
                 _ = get_system_with_neighbor_lists(system, requested_neighbor_lists)
 
-        logging.info("Subtracting composition energies")  # and potentially ZBL
+        logging.info("Subtracting composition energies")  # and potentially repulsion
         train_targets = {target_name: train_y}
         for additive_model in model.additive_models:
             train_targets = remove_additive(

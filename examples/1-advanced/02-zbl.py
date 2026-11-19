@@ -16,7 +16,9 @@ The models are trained using the following training options, respectively:
 .. literalinclude:: options_zbl.yaml
     :language: yaml
 
-As you can see, they are identical, except for the ``zbl`` key in the ``model`` section.
+As you can see, they are identical, except for the ``repulsion`` key in the ``model``
+section. Besides ``zbl``, ``repulsion`` can also be set to ``nlh`` for the more accurate
+pair-specific potential of Nordlund, Lehtola and Hobler.
 A detailed step-by-step introduction on how to train a model is provided in the
 :ref:`label_basic_usage` tutorial.
 """

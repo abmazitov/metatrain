@@ -89,6 +89,11 @@ Fixed
 Added
 #####
 
+- ``NLH`` additive model (``metatrain.utils.additive.NLH``), a short-range repulsion
+  based on the pair-specific potentials of Nordlund, Lehtola and Hobler, extrapolated
+  up to nobelium and switched off with per-element radii fitted to the r2SCAN MAD 2.0
+  dataset. It centers short-range DFT data much better than ``ZBL`` and does not leak
+  into near-equilibrium structures. Select it with ``repulsion: nlh``.
 - PET has a smoother attention cutoff. The attention that the central atom pays to a
   neighbor in the tail of the cutoff function is now proportional to its cutoff
   function, instead of switching on abruptly when the neighbor has few competitors,
@@ -114,6 +119,10 @@ Added
 Changed
 #######
 
+- The ``zbl: true/false`` model hyperparameter of PET, SOAP-BPNN, GAP and SPACE was
+  replaced by ``repulsion``, which selects the short-range repulsion: ``zbl``, ``nlh``
+  or ``null`` (the default). Existing checkpoints are upgraded automatically, and
+  options files still using ``zbl`` get an error explaining the replacement.
 - LLPR calibrates one factor for each property of each block of the targets
   (#1286).
 - The last-layer features of MACE and SPACE have the keys and components of their

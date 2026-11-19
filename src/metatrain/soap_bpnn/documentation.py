@@ -121,10 +121,15 @@ class ModelHypers(TypedDict):
     of one hidden layer with as many neurons as the
     SOAP-BPNN (see ``BPNNConfig.num_neurons_per_layer``)."""
 
-    zbl: bool = False
-    """Whether to use the ZBL short-range repulsion as the baseline for the model.
-    May be needed to achieve better description at the close-contact, repulsive regime.
-    """
+    repulsion: Optional[Literal["zbl", "nlh"]] = None
+    """Short-range repulsion used as a fixed baseline of the model, which is then
+    trained on the remaining energy. ``"nlh"`` uses the pair-specific potential of
+    Nordlund, Lehtola and Hobler (:py:class:`metatrain.utils.additive.NLH`), ``"zbl"``
+    the universal ZBL potential (:py:class:`metatrain.utils.additive.ZBL`) and
+    ``null`` disables it. ``"nlh"`` is recommended: it is more accurate in the
+    repulsive regime and leaves near-equilibrium structures untouched. May be needed
+    to achieve a better description of close contacts. Replaces the former
+    ``zbl: true/false`` option."""
 
     long_range: LongRangeHypers = init_with_defaults(LongRangeHypers)
     """Parameters related to long-range interactions.

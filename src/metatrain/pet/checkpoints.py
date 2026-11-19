@@ -439,6 +439,20 @@ def model_update_v18_v19(checkpoint: dict) -> None:
         model_hypers["smooth_attention_cutoff"] = False
 
 
+def model_update_v19_v20(checkpoint: dict) -> None:
+    """
+    Update model checkpoint from version 19 to version 20.
+
+    The ``zbl: bool`` hyperparameter was replaced by ``repulsion``, which selects
+    the short-range repulsion model (``"zbl"``, ``"nlh"`` or ``None``).
+
+    :param checkpoint: The checkpoint to update.
+    """
+    model_hypers = checkpoint["model_data"]["model_hypers"]
+    if "zbl" in model_hypers:
+        model_hypers["repulsion"] = "zbl" if model_hypers.pop("zbl") else None
+
+
 ###########################
 # TRAINER #################
 ###########################

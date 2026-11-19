@@ -17,6 +17,16 @@ from ..share.base_hypers import BaseHypers, EvalHypers, sanitize_architecture_hy
 from .hypers import init_with_defaults
 
 
+# Model options that were removed, with a hint about what replaces them
+_REPLACED_MODEL_OPTIONS = {
+    "zbl": (
+        "The 'zbl' option was replaced by 'repulsion': use 'repulsion: zbl' instead "
+        "of 'zbl: true' (or 'repulsion: nlh' for the more accurate NLH potential), "
+        "and remove 'zbl: false'."
+    ),
+}
+
+
 class MetatrainValidationError(Exception):
     """This class transforms Pydantic validation errors into a
     more user-friendly format.
@@ -177,6 +187,8 @@ class MetatrainArchitectureValidationError(MetatrainValidationError):
 
             if len(error_loc) == 2:
                 msg = f"Unrecognized option '{field}' for {hyper_type} hyperparameters."
+                if hyper_type == "model" and field in _REPLACED_MODEL_OPTIONS:
+                    msg += f"\n  {_REPLACED_MODEL_OPTIONS[field]}"
                 if arch_link:
                     msg += (
                         f"\n  For the available {hyper_type} hyperparameters see:"

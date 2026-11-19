@@ -3,7 +3,7 @@ seed: 42
 architecture:
   name: soap_bpnn
   model:
-    zbl: false
+    repulsion: null
   training:
     num_epochs: 10
     batch_size: 10

@@ -282,7 +282,7 @@ def test_regression_energy_non_conservative_stress(batch_size):
     hypers["training"]["loss"] = loss_conf
 
     model_hypers = copy.deepcopy(MODEL_HYPERS)
-    model_hypers["zbl"] = False
+    model_hypers["repulsion"] = None
     trainer = Trainer(hypers["training"])
     model = trainer.setup(model_hypers, dataset_info)
     # num_epochs=0 keeps this test focused on pre-training scaler fitting.

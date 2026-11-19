@@ -178,7 +178,15 @@ class ModelHypers(TypedDict):
 
     krr: KRRHypers = init_with_defaults(KRRHypers)
 
-    zbl: bool = False
+    repulsion: Optional[Literal["zbl", "nlh"]] = None
+    """Short-range repulsion used as a fixed baseline of the model, which is then
+    trained on the remaining energy. ``"nlh"`` uses the pair-specific potential of
+    Nordlund, Lehtola and Hobler (:py:class:`metatrain.utils.additive.NLH`), ``"zbl"``
+    the universal ZBL potential (:py:class:`metatrain.utils.additive.ZBL`) and
+    ``null`` disables it. ``"nlh"`` is recommended: it is more accurate in the
+    repulsive regime and leaves near-equilibrium structures untouched. May be needed
+    to achieve a better description of close contacts. Replaces the former
+    ``zbl: true/false`` option."""
 
 
 class TrainerHypers(TypedDict):

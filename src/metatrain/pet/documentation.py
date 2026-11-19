@@ -251,8 +251,15 @@ class ModelHypers(TypedDict):
     Additionally, the feedforward version uses bidirectional features flow during the
     message passing iterations, that favors features flowing from atom ``i`` to atom
     ``j`` to be not equal to the features flowing from atom ``j`` to atom ``i``."""
-    zbl: bool = False
-    """Use ZBL potential for short-range repulsion"""
+    repulsion: Optional[Literal["zbl", "nlh"]] = None
+    """Short-range repulsion used as a fixed baseline of the model, which is then
+    trained on the remaining energy. ``"nlh"`` uses the pair-specific potential of
+    Nordlund, Lehtola and Hobler (:py:class:`metatrain.utils.additive.NLH`), ``"zbl"``
+    the universal ZBL potential (:py:class:`metatrain.utils.additive.ZBL`) and
+    ``null`` disables it. ``"nlh"`` is recommended: it is more accurate in the
+    repulsive regime and leaves near-equilibrium structures untouched. May be needed
+    to achieve a better description of close contacts. Replaces the former
+    ``zbl: true/false`` option."""
     long_range: LongRangeHypers = init_with_defaults(LongRangeHypers)
     """Long-range Coulomb interactions parameters."""
     system_conditioning: bool = False

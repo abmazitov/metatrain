@@ -258,6 +258,7 @@ def model_from_checkpoint(
 # Registry of models that do not belong to an architecture.
 _MODEL_REGISTRY = {
     "zbl": "metatrain.utils.additive.zbl.ZBL",
+    "nlh": "metatrain.utils.additive.nlh.NLH",
     "flashmd_position_additive": (
         "metatrain.experimental.flashmd.modules.additive.PositionAdditive"
     ),
@@ -313,6 +314,22 @@ _mtt_model_versions = {
 }
 
 
+def _upgrade_legacy_model_hypers(model_hypers: Optional[dict]) -> Optional[dict]:
+    """
+    Translate the model hyperparameters of checkpoints older than the
+    MetatrainModel wrapper to the ones understood by the current trainers, which
+    use them to set up the additive models.
+
+    :param model_hypers: The model hyperparameters stored in the checkpoint.
+    :return: The translated model hyperparameters.
+    """
+    if model_hypers is not None and "zbl" in model_hypers:
+        # ``zbl: bool`` was replaced by ``repulsion: "zbl" | "nlh" | None``
+        model_hypers = dict(model_hypers)
+        model_hypers["repulsion"] = "zbl" if model_hypers.pop("zbl") else None
+    return model_hypers
+
+
 def _ckpt_from_arch_ckpt(checkpoint: dict) -> dict:
     """
     Convert a checkpoint from an architecture to one that can be loaded
@@ -338,6 +355,9 @@ def _ckpt_from_arch_ckpt(checkpoint: dict) -> dict:
                 checkpoint, version=target_version
             )
     model_data = checkpoint["model_data"]
+    legacy_model_hypers = _upgrade_legacy_model_hypers(
+        model_data.get("hypers", model_data.get("model_hypers"))
+    )
 
     # Three different ways of trying to get a MetatrainModel to get the
     # new checkpoint structure.
@@ -358,7 +378,7 @@ def _ckpt_from_arch_ckpt(checkpoint: dict) -> dict:
         trainer = architecture.__trainer__(checkpoint["train_hypers"])
 
         mtt_model = trainer.setup(
-            model_hypers=model_data.get("hypers", model_data.get("model_hypers")),
+            model_hypers=legacy_model_hypers,
             dataset_info=model_data["dataset_info"],
         )
     except Exception:
@@ -369,7 +389,7 @@ def _ckpt_from_arch_ckpt(checkpoint: dict) -> dict:
             trainer = architecture.__trainer__(hypers=default_hypers)
 
             mtt_model = trainer.setup(
-                model_hypers=model_data.get("hypers", model_data.get("model_hypers")),
+                model_hypers=legacy_model_hypers,
                 dataset_info=model_data["dataset_info"],
             )
         except Exception:
