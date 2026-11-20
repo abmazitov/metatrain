@@ -12,8 +12,7 @@ import torch
 from metatensor.torch import Labels, LabelsEntry, TensorBlock, TensorMap
 from metatomic.torch import ModelOutput, System
 
-
-FixedCompositionWeights = dict[str, float | dict[int, float]]
+from .documentation import FixedCompositionWeights  # noqa: F401
 
 
 class BaseCompositionModel(torch.nn.Module):
@@ -213,6 +212,19 @@ class BaseCompositionModel(torch.nn.Module):
                 for block in layout
             ],
         )
+
+    def remove_output(self, target_name: str) -> None:
+        """
+        Remove a previously registered target, mirroring :meth:`add_output`.
+
+        :param target_name: Name of the target to remove.
+        """
+        if target_name in self.target_names:
+            self.target_names.remove(target_name)
+        self.sample_kinds.pop(target_name, None)
+        self.XTX.pop(target_name, None)
+        self.XTY.pop(target_name, None)
+        self.weights.pop(target_name, None)
 
     def accumulate(
         self,
@@ -430,8 +442,13 @@ class BaseCompositionModel(torch.nn.Module):
                             # XTX in this case is a diagonal matrix (the counts of atoms
                             # of each type), so we can solve it faster. This also avoids
                             # NaNs getting leaked from one atom type to another.
-                            weight_vals = XTY_values / torch.diag(XTX_values).unsqueeze(
-                                1
+                            # Atom types with zero counts (not seen in the training
+                            # data) get a zero weight instead of 0/0 = NaN.
+                            counts = torch.diag(XTX_values).unsqueeze(1)
+                            weight_vals = torch.where(
+                                counts == 0,
+                                torch.zeros_like(XTY_values),
+                                XTY_values / counts,
                             )
                         weight_vals = weight_vals.reshape(*XTY_shape)
 
