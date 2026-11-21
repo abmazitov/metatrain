@@ -443,6 +443,23 @@ def model_update_v19_v20(checkpoint: dict) -> None:
     """
     Update model checkpoint from version 19 to version 20.
 
+    Adds the ``variable_num_neighbors_adaptive`` hyperparameter. Development versions
+    of the code gave the range of sampled numbers of neighbors as
+    ``num_neighbors_adaptive: [low, high]``, and used ``low`` outside of training:
+    this becomes ``num_neighbors_adaptive: low`` and
+    ``variable_num_neighbors_adaptive: [low, high]``.
+
+    :param checkpoint: The checkpoint to update.
+    """
+    model_hypers = checkpoint["model_data"]["model_hypers"]
+    if "variable_num_neighbors_adaptive" not in model_hypers:
+        model_hypers["variable_num_neighbors_adaptive"] = None
+
+
+def model_update_v20_v21(checkpoint: dict) -> None:
+    """
+    Update model checkpoint from version 20 to version 21.
+
     The ``zbl: bool`` hyperparameter was replaced by ``repulsion``, which selects
     the short-range repulsion model (``"zbl"``, ``"nlh"`` or ``None``).
 
@@ -654,3 +671,13 @@ def trainer_update_v14_v15(checkpoint: dict) -> None:
     train_hypers = checkpoint["train_hypers"]
     if "distributed" in train_hypers and train_hypers["distributed"] is None:
         train_hypers.pop("distributed")
+
+
+def trainer_update_v15_v16(checkpoint: dict) -> None:
+    """
+    Adds the extenders hyperparameter to the trainer hypers.
+
+    :param checkpoint: The checkpoint to update.
+    """
+    train_hypers = checkpoint["train_hypers"]
+    train_hypers["extenders"] = {}

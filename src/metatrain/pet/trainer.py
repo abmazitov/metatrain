@@ -41,6 +41,7 @@ from metatrain.utils.distributed.slurm import (
     resolve_distributed,
 )
 from metatrain.utils.evaluate_model import evaluate_model
+from metatrain.utils.extenders import restart_extenders, setup_extenders
 from metatrain.utils.io import check_file_extension
 from metatrain.utils.logging import ROOT_LOGGER, MetricLogger
 from metatrain.utils.loss import LossAggregator, LossSpecification
@@ -95,7 +96,7 @@ def get_scheduler(
 
 
 class Trainer(TrainerInterface[TrainerHypers, ModelHypers]):
-    __checkpoint_version__ = 15
+    __checkpoint_version__ = 16
 
     has_new_targets: bool
     _stale_finetune_targets: list[str]
@@ -117,18 +118,29 @@ class Trainer(TrainerInterface[TrainerHypers, ModelHypers]):
     def setup(
         self, model_hypers: ModelHypers, dataset_info: DatasetInfo
     ) -> MetatrainModel[PET, Scaler]:
-        model_dataset_info = densify_atomic_basis_dataset_info(dataset_info)
+        dense_dataset_info = densify_atomic_basis_dataset_info(dataset_info)
 
-        model = PET(hypers=model_hypers, dataset_info=model_dataset_info)
+        extenders, model_targets = setup_extenders(
+            dense_dataset_info, self.hypers["extenders"]
+        )
+
+        core_dataset_info = DatasetInfo(
+            length_unit=dense_dataset_info.length_unit,
+            atomic_types=dense_dataset_info.atomic_types,
+            targets=model_targets,
+            extra_data=dense_dataset_info.extra_data,
+        )
+
+        model = PET(hypers=model_hypers, dataset_info=core_dataset_info)
 
         # Set up additive models
         composition_model = CompositionModel.from_valid_targets(
-            model_dataset_info, model_dataset_info.atomic_types
+            dense_dataset_info, dense_dataset_info.atomic_types
         )
         additive_models = [composition_model]
 
         # Adds the short-range repulsion model if requested
-        repulsion = get_repulsion_model(model_hypers["repulsion"], model_dataset_info)
+        repulsion = get_repulsion_model(model_hypers["repulsion"], dense_dataset_info)
         if repulsion is not None:
             additive_models.append(repulsion)
         additive_models = torch.nn.ModuleList(additive_models)
@@ -136,13 +148,14 @@ class Trainer(TrainerInterface[TrainerHypers, ModelHypers]):
         # Initialize scaler
         scaler_hypers = get_default_hypers("scaler")["model"]
         scaler = Scaler.from_valid_targets(
-            hypers=scaler_hypers, dataset_info=model_dataset_info
+            hypers=scaler_hypers, dataset_info=dense_dataset_info
         )
 
         return MetatrainModel(
             core=model,
             additive_models=additive_models,
             scaler=scaler,
+            extenders=extenders,
             dataset_info=dataset_info,
         )
 
@@ -180,34 +193,60 @@ class Trainer(TrainerInterface[TrainerHypers, ModelHypers]):
         # ------------------------------------------------------
         #  Ask the models to restart with the new dataset info
         # -------------------------------------------------------
-        model_dataset_info = densify_atomic_basis_dataset_info(dataset_info)
+        dense_dataset_info = densify_atomic_basis_dataset_info(dataset_info)
+
+        if self.has_new_targets:
+            # Only re-run the extender setup when the targets changed;
+            # ``restart_extenders`` does not support rebuilding
+            # already-instantiated extenders.
+            extenders, model_outs, new_extenders_hypers = restart_extenders(
+                list(model.extenders),
+                dense_dataset_info,
+                self.hypers["extenders"],
+            )
+            self.hypers["extenders"] = new_extenders_hypers
+
+            model.extenders = torch.nn.ModuleList(extenders)
+            core_dataset_info = DatasetInfo(
+                length_unit=dense_dataset_info.length_unit,
+                atomic_types=dense_dataset_info.atomic_types,
+                targets=model_outs,
+                extra_data=dense_dataset_info.extra_data,
+            )
+        else:
+            core_dataset_info = DatasetInfo(
+                length_unit=dense_dataset_info.length_unit,
+                atomic_types=dense_dataset_info.atomic_types,
+                targets=model.core.dataset_info.targets,
+                extra_data=dense_dataset_info.extra_data,
+            )
 
         comp_model_info = DatasetInfo(
-            length_unit=model_dataset_info.length_unit,
-            atomic_types=model_dataset_info.atomic_types,
+            length_unit=dense_dataset_info.length_unit,
+            atomic_types=dense_dataset_info.atomic_types,
             targets={
                 target_name: target_info
-                for target_name, target_info in model_dataset_info.targets.items()
+                for target_name, target_info in dense_dataset_info.targets.items()
                 if model.additive_models[0].is_valid_target(target_name, target_info)
             },
         )
 
         scaler_info = DatasetInfo(
-            length_unit=model_dataset_info.length_unit,
-            atomic_types=model_dataset_info.atomic_types,
+            length_unit=dense_dataset_info.length_unit,
+            atomic_types=dense_dataset_info.atomic_types,
             targets={
                 target_name: target_info
-                for target_name, target_info in model_dataset_info.targets.items()
+                for target_name, target_info in dense_dataset_info.targets.items()
                 if model.scaler.is_valid_target(target_name, target_info)
             },
-            extra_data=model_dataset_info.extra_data,
+            extra_data=dense_dataset_info.extra_data,
         )
 
         model.restart(
             dataset_info,
-            model_dataset_info,
+            core_dataset_info,
             additive_models_dataset_info=[comp_model_info]
-            + [model_dataset_info] * (len(model.additive_models) - 1),
+            + [dense_dataset_info] * (len(model.additive_models) - 1),
             scaler_dataset_info=scaler_info,
             model_hypers=model_hypers,
         )
@@ -298,7 +337,8 @@ class Trainer(TrainerInterface[TrainerHypers, ModelHypers]):
         max_atoms = self.hypers["max_atoms_per_batch"]
         atomic_basis_transform, atomic_basis_reverse_transform = (
             get_prepare_atomic_basis_targets_transform(
-                model.dataset_info, model.core.dataset_info
+                model.dataset_info,
+                model.internal_dataset_info(),
             )
         )
 
@@ -528,6 +568,11 @@ class Trainer(TrainerInterface[TrainerHypers, ModelHypers]):
             self.best_metric = float("inf")
         logging.info("Starting training")
         epoch = start_epoch
+        # Sample the target number of neighbors of the adaptive cutoff from the
+        # `variable_num_neighbors_adaptive` range (if set) for the training batches
+        # only. Validation uses `num_neighbors_adaptive`, as the exported model does.
+        pet_backend = (model.module if is_distributed else model).core.backend
+        pet_backend.sample_num_neighbors = True
 
         for epoch in range(start_epoch, self.hypers["num_epochs"]):
             for sampler in epoch_samplers:
@@ -658,6 +703,7 @@ class Trainer(TrainerInterface[TrainerHypers, ModelHypers]):
                         )
                     )
 
+            pet_backend.sample_num_neighbors = False
             with torch.set_grad_enabled(
                 any(target_info.gradients for target_info in train_targets.values())
             ):  # keep gradients on if any of the targets require them
@@ -746,6 +792,7 @@ class Trainer(TrainerInterface[TrainerHypers, ModelHypers]):
                         val_mae_calculator.update(
                             scaled_predictions, scaled_targets, extra_data
                         )
+            pet_backend.sample_num_neighbors = True
 
             # Compute val metrics:
             finalized_val_info = val_rmse_calculator.finalize(
@@ -812,6 +859,8 @@ class Trainer(TrainerInterface[TrainerHypers, ModelHypers]):
                         (model.module if is_distributed else model),
                         Path(checkpoint_dir) / f"model_{epoch}.ckpt",
                     )
+
+        pet_backend.sample_num_neighbors = False
 
         # prepare for the checkpoint that will be saved outside the function
         self.epoch = epoch
