@@ -221,15 +221,20 @@ class Trainer(TrainerInterface[TrainerHypers, ModelHypers]):
                 extra_data=dense_dataset_info.extra_data,
             )
 
-        comp_model_info = DatasetInfo(
-            length_unit=dense_dataset_info.length_unit,
-            atomic_types=dense_dataset_info.atomic_types,
-            targets={
-                target_name: target_info
-                for target_name, target_info in dense_dataset_info.targets.items()
-                if model.additive_models[0].is_valid_target(target_name, target_info)
-            },
-        )
+        # each additive model (composition, repulsion, ...) only gets the targets it
+        # supports, e.g. no non-conservative forces for the repulsion models
+        additive_models_info = [
+            DatasetInfo(
+                length_unit=dense_dataset_info.length_unit,
+                atomic_types=dense_dataset_info.atomic_types,
+                targets={
+                    target_name: target_info
+                    for target_name, target_info in dense_dataset_info.targets.items()
+                    if additive_model.is_valid_target(target_name, target_info)
+                },
+            )
+            for additive_model in model.additive_models
+        ]
 
         scaler_info = DatasetInfo(
             length_unit=dense_dataset_info.length_unit,
@@ -245,8 +250,7 @@ class Trainer(TrainerInterface[TrainerHypers, ModelHypers]):
         model.restart(
             dataset_info,
             core_dataset_info,
-            additive_models_dataset_info=[comp_model_info]
-            + [dense_dataset_info] * (len(model.additive_models) - 1),
+            additive_models_dataset_info=additive_models_info,
             scaler_dataset_info=scaler_info,
             model_hypers=model_hypers,
         )
