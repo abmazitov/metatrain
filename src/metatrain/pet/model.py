@@ -108,7 +108,9 @@ class PET(ModelInterface[ModelHypers]):
         # check the targets of the adaptive cutoff, and set them in the backend
         self._set_num_neighbors_adaptive(
             self.hypers["num_neighbors_adaptive"],
-            self.hypers["variable_num_neighbors_adaptive"],
+            # ``.get``: checkpoints older than the MetatrainModel wrapper set up
+            # their additive models with their original (non-upgraded) hypers
+            self.hypers.get("variable_num_neighbors_adaptive", None),
         )
         self.num_readout_layers = self.backend.num_readout_layers
         self.system_conditioning = self.backend.system_conditioning
