@@ -102,7 +102,8 @@ Added
 #####
 
 - ``NLH`` short-range repulsion (``repulsion: nlh``), based on the Nordlund, Lehtola
-  and Hobler pair potentials. It fits short-range DFT data better than ``ZBL``.
+  and Hobler pair potentials, fine-tuned to the r2SCAN MAD 2.0 dataset to cover missing
+  elements. 
 - PET can now randomly vary the ``num_neighbors_adaptive`` parameter during training. (#1356)
 - Extenders as a new concept in metatrain. They can be used to augment the capabilities
   of architectures (#1209).
