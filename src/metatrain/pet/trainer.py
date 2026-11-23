@@ -363,6 +363,7 @@ class Trainer(TrainerInterface[TrainerHypers, ModelHypers]):
             device=device,
             batch_size=self.hypers["batch_size"],
             is_distributed=is_distributed,
+            num_workers=self.hypers["num_workers"],
             checkpoint_dir=checkpoint_dir,
         )
 
@@ -391,6 +392,7 @@ class Trainer(TrainerInterface[TrainerHypers, ModelHypers]):
                 device=device,
                 batch_size=self.hypers["batch_size"],
                 is_distributed=is_distributed,
+                num_workers=self.hypers["num_workers"],
                 fixed_weights=self.hypers["fixed_scaling_weights"],
                 per_structure_targets=self.hypers["per_structure_targets"],
                 checkpoint_dir=checkpoint_dir,

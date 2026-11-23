@@ -12,8 +12,10 @@ from metatrain.utils.additive.nlh import (
     nlh_coefficients,
     nlh_switching_radius,
 )
+from metatrain.utils.additive.remove import _evaluate_pair_potential
 from metatrain.utils.data import DatasetInfo
 from metatrain.utils.data.target_info import get_energy_target_info
+from metatrain.utils.evaluate_model import evaluate_model
 from metatrain.utils.io import arch_model_from_checkpoint
 from metatrain.utils.neighbor_lists import (
     get_requested_neighbor_lists,
@@ -209,3 +211,54 @@ def test_nlh_restart_with_new_types():
 def test_nlh_rejects_lengths_that_are_not_angstroms(length_unit):
     with pytest.raises(ValueError, match="NLH only supports angstrom"):
         NLH({}, _dataset_info([1, 6], length_unit))
+
+
+def test_nlh_analytic_gradients_match_autograd():
+    """The gradients used to remove NLH from the targets (without autograd, see
+    ``_evaluate_pair_potential``) are the ones of autograd."""
+    torch.manual_seed(0)
+    types = [1, 6, 8, 26, 79]
+    target_info = get_energy_target_info(
+        "energy",
+        {"unit": "eV"},
+        add_position_gradients=True,
+        add_strain_gradients=True,
+    )
+    model = NLH({}, _dataset_info(types))
+
+    systems = [_dimer(6, 6, 0.6), _dimer(1, 8, 0.9)]
+    for _ in range(3):
+        # periodic systems, with short distances, also between periodic images
+        n_atoms = 6
+        cell = 3.0 * torch.eye(3, dtype=torch.float64) + 0.3 * torch.rand(
+            3, 3, dtype=torch.float64
+        )
+        systems.append(
+            System(
+                types=torch.tensor(types)[torch.randint(len(types), (n_atoms,))].to(
+                    torch.int32
+                ),
+                positions=torch.rand(n_atoms, 3, dtype=torch.float64) @ cell,
+                cell=cell,
+                pbc=torch.tensor([True, True, True]),
+            )
+        )
+    nls = get_requested_neighbor_lists(model)
+    systems = [get_system_with_neighbor_lists(s, nls) for s in systems]
+
+    reference = evaluate_model(
+        model, systems, {"energy": target_info}, is_training=False
+    )["energy"].block()
+    analytic = _evaluate_pair_potential(model, systems, {"energy": target_info})[
+        "energy"
+    ].block()
+
+    assert torch.allclose(analytic.values, reference.values)
+    for parameter in ["positions", "strain"]:
+        assert reference.gradient(parameter).values.abs().max() > 0
+        assert mts.equal_metadata_block(
+            analytic.gradient(parameter), reference.gradient(parameter)
+        )
+        assert torch.allclose(
+            analytic.gradient(parameter).values, reference.gradient(parameter).values
+        )

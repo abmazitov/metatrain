@@ -11,7 +11,12 @@ from metatomic.torch import System
 from ..data import TargetInfo
 from ..data.dataset import CollateTransform
 from ..data.match_tmaps import match_layout
-from ..evaluate_model import evaluate_model
+from ..evaluate_model import (
+    _get_model_outputs,
+    _position_gradients_to_block,
+    _strain_gradients_to_block,
+    evaluate_model,
+)
 
 
 def remove_additive(
@@ -38,16 +43,24 @@ def remove_additive(
         ),
     )
 
-    additive_contribution = evaluate_model(
-        additive_model,
-        systems,
-        {
-            key: target_info_dict[key]
-            for key in targets.keys()
-            if key in additive_model.outputs
-        },
-        is_training=False,  # we don't need any gradients w.r.t. any parameters
-    )
+    additive_targets = {
+        key: target_info_dict[key]
+        for key in targets.keys()
+        if key in additive_model.outputs
+    }
+    if hasattr(additive_model, "pair_energy_and_derivative"):
+        # pair potentials: forces and stress without autograd, which can not run in
+        # the forked ``DataLoader`` workers where this function is usually called
+        additive_contribution = _evaluate_pair_potential(
+            additive_model, systems, additive_targets
+        )
+    else:
+        additive_contribution = evaluate_model(
+            additive_model,
+            systems,
+            additive_targets,
+            is_training=False,  # we don't need any gradients w.r.t. any parameters
+        )
 
     for target_key in additive_contribution.keys():
         if (
@@ -153,6 +166,67 @@ def remove_additive(
         )
 
     return targets
+
+
+def _evaluate_pair_potential(
+    model: torch.nn.Module,
+    systems: List[System],
+    targets: Dict[str, TargetInfo],
+) -> Dict[str, TensorMap]:
+    """Evaluate a pair potential, with the gradients requested by the targets.
+
+    The gradients are computed from the analytical derivative of the pair energy,
+    ``model.pair_energy_and_derivative(zi, zj, rij)``, on the (full) neighbor list
+    requested by the model, and laid out as in
+    :py:func:`metatrain.utils.evaluate_model.evaluate_model`.
+
+    :param model: The pair potential.
+    :param systems: The systems to evaluate the model on.
+    :param targets: The targets to compute, with the gradients to compute.
+    :return: The predictions of the model, with the requested gradients.
+    """
+    outputs = _get_model_outputs(model, systems, targets, check_consistency=False)
+
+    nl_options = model.requested_neighbor_lists()[0]
+    assert nl_options.full_list
+    positions_gradients: List[torch.Tensor] = []
+    strain_gradients: List[torch.Tensor] = []
+    for system in systems:
+        nl = system.get_neighbor_list(nl_options)
+        first = nl.samples.column("first_atom")
+        second = nl.samples.column("second_atom")
+        vectors = nl.values.reshape(-1, 3)
+        distances = torch.linalg.vector_norm(vectors, dim=-1)
+        _, denergy = model.pair_energy_and_derivative(
+            system.types[first], system.types[second], distances
+        )
+        # dE/d(r_j - r_i) for each pair; the list is full, so each pair is there
+        # twice and the energy has a factor 1/2
+        pair_gradients = (0.5 * denergy / distances).unsqueeze(-1) * vectors
+
+        gradient = torch.zeros_like(system.positions)
+        gradient.index_add_(0, second, pair_gradients)
+        gradient.index_add_(0, first, -pair_gradients)
+        positions_gradients.append(gradient)
+        # positions (and cell) are multiplied by (1 + strain) on the right
+        strain_gradients.append(vectors.T @ pair_gradients)
+
+    for name, target in targets.items():
+        if target.quantity != "energy":
+            continue
+        gradients = target.gradients
+        if "positions" not in gradients and "strain" not in gradients:
+            continue
+        block = outputs[name].block().copy(deep=False)
+        if "positions" in gradients:
+            block.add_gradient(
+                "positions", _position_gradients_to_block(positions_gradients)
+            )
+        if "strain" in gradients:
+            block.add_gradient("strain", _strain_gradients_to_block(strain_gradients))
+        outputs[name] = TensorMap(keys=outputs[name].keys, blocks=[block])
+
+    return outputs
 
 
 def get_remove_additive_transform(

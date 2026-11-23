@@ -40,6 +40,7 @@ def train_or_load_scaler(
     per_structure_targets: Sequence[str] = (),
     trainer_hypers: Optional[dict] = None,
     checkpoint_dir: str = "",
+    num_workers: Optional[int] = None,
 ) -> None:
     """
     Train the scaler from data or load pre-trained weights.
@@ -66,6 +67,8 @@ def train_or_load_scaler(
         per-structure quantities and therefore not divided by the number of atoms.
     :param trainer_hypers: Additional hyperparameters for the trainer.
     :param checkpoint_dir: Directory to save the scaler checkpoint
+    :param num_workers: Number of workers for data loading. If ``None``, the
+        number is chosen automatically.
     """
     if isinstance(scaler, Scaler):
         scaler = MetatrainModel(
@@ -125,6 +128,7 @@ def train_or_load_scaler(
                 "distributed": is_distributed,
                 "additive_models": additive_models,
                 "per_structure_targets": list(per_structure_targets),
+                "num_workers": num_workers,
                 **(trainer_hypers or {}),
             }
         )

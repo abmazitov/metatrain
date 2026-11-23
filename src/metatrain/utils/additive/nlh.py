@@ -433,6 +433,44 @@ class NLH(ModelInterface):
 
         return energy * switch
 
+    def pair_energy_and_derivative(
+        self, zi: torch.Tensor, zj: torch.Tensor, rij: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Switched NLH energy of isolated atom pairs and its derivative with respect to
+        the distance, computed analytically.
+
+        This lets the force and stress contributions be computed without autograd,
+        which can not run in the forked ``DataLoader`` workers that remove the
+        additive contributions from the targets.
+
+        :param zi: Atomic numbers of the first atoms.
+        :param zj: Atomic numbers of the second atoms.
+        :param rij: Distances between the atoms, in Å.
+        :return: The energy (in eV) of each pair, and its derivative (in eV/Å).
+        """
+        ti = self.species_to_index[zi]
+        tj = self.species_to_index[zj]
+        a = self.coefficients_a[ti, tj].to(rij.dtype)
+        b = self.coefficients_b[ti, tj].to(rij.dtype)
+        r_cut = self.switching_radii[ti, tj].to(rij.dtype)
+        r_on = self.switch_onset * r_cut
+
+        exponentials = a * torch.exp(-b * rij.unsqueeze(-1))
+        phi = torch.sum(exponentials, dim=-1)
+        dphi = -torch.sum(b * exponentials, dim=-1)
+        prefactor = self.coulomb_constant * (zi * zj).to(rij.dtype)
+        energy = prefactor * phi / rij
+        denergy = prefactor * (dphi / rij - phi / rij**2)
+
+        # the derivative of the smootherstep, 30 x^2 (1 - x)^2, vanishes at the
+        # edges of the clamp, so that it is also correct outside of [r_on, r_cut]
+        x = torch.clamp((rij - r_on) / (r_cut - r_on), 0.0, 1.0)
+        switch = 1.0 - x**3 * (10.0 - 15.0 * x + 6.0 * x**2)
+        dswitch = -30.0 * x**2 * (1.0 - x) ** 2 / (r_cut - r_on)
+
+        return energy * switch, denergy * switch + energy * dswitch
+
     def requested_neighbor_lists(self) -> List[NeighborListOptions]:
         return [
             NeighborListOptions(

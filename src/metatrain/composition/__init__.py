@@ -1,5 +1,5 @@
 import logging
-from typing import List, Union
+from typing import List, Optional, Union
 
 import torch
 from torch import nn
@@ -36,6 +36,7 @@ def train_or_load_composition_model(
     batch_size: int,
     is_distributed: bool,
     checkpoint_dir: str = "",
+    num_workers: Optional[int] = None,
 ) -> None:
     """
     Train the composition model from data or load pre-trained weights.
@@ -53,6 +54,8 @@ def train_or_load_composition_model(
     :param batch_size: Batch size for data loading
     :param is_distributed: Whether training is distributed
     :param checkpoint_dir: Directory to save the composition model checkpoint
+    :param num_workers: Number of workers for data loading. If ``None``, the
+        number is chosen automatically.
     """
     if isinstance(composition_model, CompositionModel):
         model = MetatrainModel(
@@ -112,6 +115,7 @@ def train_or_load_composition_model(
         hypers["atomic_baseline"] = atomic_baseline
         hypers["batch_size"] = batch_size
         hypers["distributed"] = is_distributed
+        hypers["num_workers"] = num_workers
         trainer = Trainer(hypers=hypers)
         trainer._additive_models = other_additive_models
         trainer.train(
