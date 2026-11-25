@@ -184,9 +184,10 @@ class ModelHypers(TypedDict):
     Nordlund, Lehtola and Hobler (:py:class:`metatrain.utils.additive.NLH`), ``"zbl"``
     the universal ZBL potential (:py:class:`metatrain.utils.additive.ZBL`) and
     ``null`` disables it. ``"nlh"`` is recommended: it is more accurate in the
-    repulsive regime and leaves near-equilibrium structures untouched. May be needed
-    to achieve a better description of close contacts. Replaces the former
-    ``zbl: true/false`` option."""
+    repulsive regime, and only acts below the shortest interatomic distances of the
+    PET-MAD 2.0 training data, so that it leaves all of them unchanged and only
+    guards against unphysically close contacts. May be needed to achieve a better
+    description of close contacts. Replaces the former ``zbl: true/false`` option."""
 
 
 class TrainerHypers(TypedDict):

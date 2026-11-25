@@ -34,76 +34,19 @@ _COEFFICIENTS_FILE = Path(__file__).parent / "nlh_coefficients.dat"
 # The NLH paper tabulates all pairs with 1 <= Z <= 92
 _MAX_TABULATED_Z = 92
 
-# Fraction of the switching radius below which the NLH potential is used unmodified
-# (fitted together with the radii below, see there)
-_SWITCH_ONSET = 0.673
+# Elements supported by the NLH potential, from H to No
+_MAX_Z = 102
 
-# Per-element repulsion radii (Angstrom), from H (Z=1) to No (Z=102). The NLH
-# potential between atoms i and j is used unmodified below ``r_on = _SWITCH_ONSET *
-# r_c``, and multiplied by a C2 "smootherstep" switching function going from 1 at
-# ``r_on`` to 0 at ``r_c = R_i + R_j``.
-#
-# The radii and the onset were fitted once, offline, on the training split of the
-# r2SCAN MAD 2.0 dataset (version 2.0rc5), with the following procedure:
-#
-# 1. Data: all 842,134 structures (23.6M atoms) of the training split, in 28
-#    subsets; only the "monomers" subset (single atoms) is excluded. The "dimers"
-#    subset contains dimer curves of every pair of elements, reaching into the
-#    repulsive wall.
-# 2. Parametrization: R_i = R_cov,i * (0.4 + 1.1 * sigmoid(theta_i)), i.e. each
-#    radius is constrained to [0.4, 1.5] x R_cov,i. R_cov are the covalent radii
-#    of Cordero et al. (as in ``ase.data.covalent_radii``), completed for Bk-No
-#    (which ASE lacks) with the single-bond radii of Pyykko and Atsumi: 1.70 (Bk,
-#    interpolated), 1.72, 1.66, 1.66, 1.68 and 1.68 Angstrom. The onset is
-#    _SWITCH_ONSET = sigmoid(tau). This gives 103 parameters in total.
-# 3. Loss: for every subset g, the relative residual force
-#    L_g = sum_atoms |F_DFT - F_NLH|^2 / sum_atoms |F_DFT|^2, averaged over all
-#    subsets with equal weight, plus a penalty 1e-3 * sum_i (theta_i - theta_0)^2
-#    pulling the radii towards 0.8 x R_cov,i. Giving every subset the same weight
-#    balances the two goals of the potential: near-equilibrium subsets (small
-#    forces) penalize any leaking of the repulsion into bonded configurations, and
-#    so push the radii down, while compressed, rattled and dimer subsets reward
-#    removing the steep repulsive wall, and push them up. Energies are not part of
-#    the loss.
-# 4. Optimization, in two stages. First, a preliminary fit starting from
-#    R_i = 0.8 x R_cov,i and _SWITCH_ONSET = 0.5, on a ~1% subsample of the
-#    training split (Adam, learning rate 0.05, 300 full-batch steps). Then,
-#    starting from that fit, the final fit on the full training split (Adam,
-#    learning rate 0.01, cosine-decayed to 1e-3, 400 steps), where each step uses
-#    256 random structures of every subset (all of them for smaller subsets), with
-#    weights n_g / 256 making the batch loss an unbiased estimate of the full loss,
-#    and neighbor lists computed from scratch for every batch. The radii were
-#    rounded to 1e-3 Angstrom.
-#
-# On the 169,758 held-out structures of the validation and test splits, the
-# relative RMS of the residual forces is 0.94 on average over near-equilibrium
-# subsets (3.5 for the ZBL potential switched off at the covalent radii, which
-# leaks into bonded configurations), and 0.59 over compressed and rattled subsets
-# (1.15 for ZBL). The potential is not forced to vanish at equilibrium bond
-# lengths: over all of MAD 2.0rc5, it acts on 2.2% of the atoms of relaxed
-# structures (mc3d, mc3d_ext and shiftml subsets), and exceeds 0.5 eV/A for 0.13%
-# of them, mostly for short metal-metal and actinyl bonds of d and f elements.
-# Such small and smooth contributions are left to the machine learning model. The
-# radii should be refitted if the potential is used as a baseline for very
-# different reference data.
-# fmt: off
-_REPULSION_RADII = [
-    0.410, 0.230, 1.045, 0.779, 0.725, 0.618, 0.556, 0.547,
-    0.570, 0.489, 1.300, 1.220, 1.125, 1.059, 0.953, 0.898,
-    0.885, 0.928, 1.656, 1.473, 1.391, 1.259, 1.050, 1.055,
-    1.042, 1.087, 0.990, 1.074, 1.196, 1.085, 1.105, 1.160,
-    1.120, 1.104, 1.078, 1.038, 1.788, 1.649, 1.539, 1.429,
-    1.238, 1.166, 1.055, 1.094, 1.118, 1.237, 1.358, 1.298,
-    1.318, 1.303, 1.307, 1.334, 1.268, 1.257, 1.952, 1.776,
-    1.507, 1.456, 1.428, 1.458, 1.633, 1.615, 1.608, 1.575,
-    1.552, 1.530, 1.568, 1.556, 1.566, 1.588, 1.486, 1.411,
-    1.300, 1.192, 1.181, 1.100, 1.141, 1.210, 1.254, 1.275,
-    1.344, 1.365, 1.414, 1.290, 1.332, 1.415, 2.109, 1.779,
-    1.678, 1.419, 1.529, 1.297, 1.368, 1.350, 1.406, 1.376,
-    1.396, 1.401, 1.345, 1.364, 1.379, 1.395,
-]
-# fmt: on
-_MAX_Z = len(_REPULSION_RADII)
+# Shortest distance between two atoms of every pair of elements in the training data
+# of PET-MAD 2.0, see :py:func:`nlh_min_distance`
+_MIN_DISTANCES_FILE = Path(__file__).parent / "nlh_min_distances.dat"
+
+# The NLH potential of a pair vanishes above ``r_c = r_min - _CUTOFF_MARGIN`` (but at
+# least ``r_min / 2``), where ``r_min`` is the shortest distance between the two
+# elements in the training data, and is switched on over ``_SWITCH_WIDTH`` below
+# ``r_c``, see :py:func:`nlh_switching_radii`.
+_CUTOFF_MARGIN = 0.4
+_SWITCH_WIDTH = 0.4
 
 
 @lru_cache(maxsize=1)
@@ -147,12 +90,7 @@ def nlh_coefficients(z1: int, z2: int) -> Tuple[List[float], List[float]]:
     :param z2: Atomic number of the second element.
     :return: The ``a`` and ``b`` coefficients (three of each).
     """
-    for z in (z1, z2):
-        if z < 1 or z > _MAX_Z:
-            raise ValueError(
-                f"the NLH potential is only available for elements with 1 <= Z <= "
-                f"{_MAX_Z}, got Z={z}"
-            )
+    _check_atomic_numbers(z1, z2)
 
     proxy_1, proxy_2 = sorted((min(z1, _MAX_TABULATED_Z), min(z2, _MAX_TABULATED_Z)))
     a, b = _tabulated_coefficients()[(proxy_1, proxy_2)]
@@ -160,24 +98,69 @@ def nlh_coefficients(z1: int, z2: int) -> Tuple[List[float], List[float]]:
     return list(a), [b_k * scale for b_k in b]
 
 
-def nlh_switching_radius(z1: int, z2: int) -> float:
-    """
-    Distance (in Å) at which the NLH potential of a pair is switched off.
+@lru_cache(maxsize=1)
+def _tabulated_min_distances() -> Dict[Tuple[int, int], float]:
+    """Read the table of shortest distances shipped with metatrain.
 
-    This is the sum of the repulsion radii of the two elements, fitted to the r2SCAN
-    MAD 2.0 dataset.
-
-    :param z1: Atomic number of the first element.
-    :param z2: Atomic number of the second element.
-    :return: The switching radius of the pair.
+    :return: A dictionary mapping ``(Z1, Z2)`` with ``Z1 <= Z2`` to the shortest
+        distance (in Å) between the two elements in the training data.
     """
+    table: Dict[Tuple[int, int], float] = {}
+    with open(_MIN_DISTANCES_FILE, "r") as fd:
+        for line in fd:
+            if line.startswith("#") or not line.strip():
+                continue
+            fields = line.split()
+            z1, z2 = sorted((int(fields[0]), int(fields[1])))
+            table[(z1, z2)] = float(fields[2])
+    return table
+
+
+def _check_atomic_numbers(z1: int, z2: int) -> None:
     for z in (z1, z2):
         if z < 1 or z > _MAX_Z:
             raise ValueError(
                 f"the NLH potential is only available for elements with 1 <= Z <= "
                 f"{_MAX_Z}, got Z={z}"
             )
-    return _REPULSION_RADII[z1 - 1] + _REPULSION_RADII[z2 - 1]
+
+
+def nlh_min_distance(z1: int, z2: int) -> float:
+    """
+    Shortest distance (in Å) between two atoms of a pair of elements in the training
+    data of PET-MAD 2.0.
+
+    This is the shortest of all interatomic distances (also between periodic images)
+    in the training splits of the r2SCAN MAD 2.0 dataset (version 2.0rc5) and of the
+    PBE MAD 1.5 dataset, which contain every pair of elements up to nobelium.
+
+    :param z1: Atomic number of the first element.
+    :param z2: Atomic number of the second element.
+    :return: The shortest distance of the pair.
+    """
+    _check_atomic_numbers(z1, z2)
+    return _tabulated_min_distances()[(min(z1, z2), max(z1, z2))]
+
+
+def nlh_switching_radii(z1: int, z2: int) -> Tuple[float, float]:
+    """
+    Distances (in Å) between which the NLH potential of a pair is switched off.
+
+    The potential vanishes above :math:`r_c = \\max(r_{min} - 0.4, r_{min} / 2)`,
+    where :math:`r_{min}` is the shortest distance between the two elements in the
+    training data (see :py:func:`nlh_min_distance`), so that it is zero for all of
+    the training data. It is used unmodified below :math:`r_{on} = \\max(r_c - 0.4,
+    0)`.
+
+    :param z1: Atomic number of the first element.
+    :param z2: Atomic number of the second element.
+    :return: The onset :math:`r_{on}` and the cutoff :math:`r_c` of the switching
+        function of the pair.
+    """
+    r_min = nlh_min_distance(z1, z2)
+    r_cut = max(r_min - _CUTOFF_MARGIN, 0.5 * r_min)
+    r_on = max(r_cut - _SWITCH_WIDTH, 0.0)
+    return r_on, r_cut
 
 
 class NLH(ModelInterface):
@@ -194,12 +177,14 @@ class NLH(ModelInterface):
     (:math:`Z = 102`) are supported by extrapolation, see
     :py:func:`nlh_coefficients`.
 
-    The potential is used unmodified below :math:`0.673 \\, r_c` and multiplied by a
-    smooth (:math:`C^2`) switching function going to zero at :math:`r_c = R_i + R_j`,
-    the sum of per-element radii (see :py:func:`nlh_switching_radius`). The radii are
-    fitted to the r2SCAN MAD 2.0 dataset, so that the potential removes most of the
-    steep short-range repulsion from the data while barely affecting bonded
-    configurations, which are left to the machine learning model.
+    The potential is a safety wall below the training data. For every pair of
+    elements, it is multiplied by a smooth (:math:`C^2`) switching function, going
+    from one at :math:`r_{on}` to zero at :math:`r_c`, about 0.4 Å below the shortest
+    distance between the two elements in the training data of PET-MAD 2.0 (see
+    :py:func:`nlh_switching_radii`). It is therefore zero for all of the training
+    data, which the machine learning model learns unchanged, including its
+    short-range repulsion. The potential only acts on closer contacts, where the
+    machine learning model has no data and its repulsion can break down.
 
     :param hypers: A dictionary of model hyperparameters. This parameter is ignored and
         is only present to be consistent with the general model API.
@@ -207,12 +192,13 @@ class NLH(ModelInterface):
         target quantities and atomic types.
     """
 
-    __checkpoint_version__ = 1
+    __checkpoint_version__ = 2
     __supported_devices__ = ["cuda", "cpu"]
     __supported_dtypes__ = [torch.float32, torch.float64]
     species_to_index: torch.Tensor
     coefficients_a: torch.Tensor
     coefficients_b: torch.Tensor
+    switching_onsets: torch.Tensor
     switching_radii: torch.Tensor
 
     __default_metadata__ = ModelMetadata(
@@ -251,12 +237,12 @@ class NLH(ModelInterface):
 
         self.dataset_info = dataset_info
         self.outputs: Dict[str, TargetInfo] = dict(dataset_info.targets)
-        self.switch_onset = _SWITCH_ONSET
         self.coulomb_constant = _COULOMB_CONSTANT
 
         self.register_buffer("species_to_index", torch.empty(0, dtype=torch.int))
         self.register_buffer("coefficients_a", torch.empty(0, dtype=torch.float64))
         self.register_buffer("coefficients_b", torch.empty(0, dtype=torch.float64))
+        self.register_buffer("switching_onsets", torch.empty(0, dtype=torch.float64))
         self.register_buffer("switching_radii", torch.empty(0, dtype=torch.float64))
         self.cutoff_radius = 0.0
         self._set_atomic_types(dataset_info.atomic_types)
@@ -271,6 +257,7 @@ class NLH(ModelInterface):
         )
         coefficients_a = torch.zeros((n_types, n_types, 3), dtype=torch.float64)
         coefficients_b = torch.zeros((n_types, n_types, 3), dtype=torch.float64)
+        switching_onsets = torch.zeros((n_types, n_types), dtype=torch.float64)
         switching_radii = torch.zeros((n_types, n_types), dtype=torch.float64)
 
         for i, z_i in enumerate(self.atomic_types):
@@ -279,7 +266,9 @@ class NLH(ModelInterface):
                 a, b = nlh_coefficients(z_i, z_j)
                 coefficients_a[i, j] = torch.tensor(a, dtype=torch.float64)
                 coefficients_b[i, j] = torch.tensor(b, dtype=torch.float64)
-                switching_radii[i, j] = nlh_switching_radius(z_i, z_j)
+                r_on, r_cut = nlh_switching_radii(z_i, z_j)
+                switching_onsets[i, j] = r_on
+                switching_radii[i, j] = r_cut
 
         if any(z > _MAX_TABULATED_Z for z in self.atomic_types):
             logging.info(
@@ -290,6 +279,7 @@ class NLH(ModelInterface):
         self.species_to_index = species_to_index.to(device)
         self.coefficients_a = coefficients_a.to(device)
         self.coefficients_b = coefficients_b.to(device)
+        self.switching_onsets = switching_onsets.to(device)
         self.switching_radii = switching_radii.to(device)
         self.cutoff_radius = float(torch.max(switching_radii))
 
@@ -417,21 +407,7 @@ class NLH(ModelInterface):
         :param rij: Distances between the atoms, in Å.
         :return: The energy (in eV) of each pair.
         """
-        ti = self.species_to_index[zi]
-        tj = self.species_to_index[zj]
-        a = self.coefficients_a[ti, tj].to(rij.dtype)
-        b = self.coefficients_b[ti, tj].to(rij.dtype)
-        r_cut = self.switching_radii[ti, tj].to(rij.dtype)
-        r_on = self.switch_onset * r_cut
-
-        phi = torch.sum(a * torch.exp(-b * rij.unsqueeze(-1)), dim=-1)
-        energy = self.coulomb_constant * (zi * zj).to(rij.dtype) / rij * phi
-
-        # C2 "smootherstep" switching function, 1 below r_on and 0 above r_cut
-        x = torch.clamp((rij - r_on) / (r_cut - r_on), 0.0, 1.0)
-        switch = 1.0 - x**3 * (10.0 - 15.0 * x + 6.0 * x**2)
-
-        return energy * switch
+        return self.pair_energy_and_derivative(zi, zj, rij)[0]
 
     def pair_energy_and_derivative(
         self, zi: torch.Tensor, zj: torch.Tensor, rij: torch.Tensor
@@ -440,9 +416,10 @@ class NLH(ModelInterface):
         Switched NLH energy of isolated atom pairs and its derivative with respect to
         the distance, computed analytically.
 
-        This lets the force and stress contributions be computed without autograd,
-        which can not run in the forked ``DataLoader`` workers that remove the
-        additive contributions from the targets.
+        This is the only place where the potential is evaluated: the energy is used by
+        :py:meth:`forward` (where autograd gives the forces and the stress), and the
+        derivative to remove the potential from the targets, in the forked
+        ``DataLoader`` workers where autograd can not run.
 
         :param zi: Atomic numbers of the first atoms.
         :param zj: Atomic numbers of the second atoms.
@@ -453,8 +430,8 @@ class NLH(ModelInterface):
         tj = self.species_to_index[zj]
         a = self.coefficients_a[ti, tj].to(rij.dtype)
         b = self.coefficients_b[ti, tj].to(rij.dtype)
+        r_on = self.switching_onsets[ti, tj].to(rij.dtype)
         r_cut = self.switching_radii[ti, tj].to(rij.dtype)
-        r_on = self.switch_onset * r_cut
 
         exponentials = a * torch.exp(-b * rij.unsqueeze(-1))
         phi = torch.sum(exponentials, dim=-1)
@@ -547,6 +524,8 @@ class NLH(ModelInterface):
             dataset_info=checkpoint["model_data"]["dataset_info"],
         )
         model.load_state_dict(checkpoint["model_state_dict"])
+        # the radii of the checkpoint can differ from the current tabulated ones
+        model.cutoff_radius = float(torch.max(model.switching_radii))
         return model
 
     @classmethod
@@ -564,10 +543,20 @@ class NLH(ModelInterface):
         """
         if version is None:
             version = cls.__checkpoint_version__
+        if checkpoint["model_ckpt_version"] == 1 and version >= 2:
+            # Version 1 switched the potential on below a fixed fraction (0.673) of
+            # per-pair radii, which are stored in the checkpoint: keep that potential
+            for key in ["model_state_dict", "best_model_state_dict"]:
+                state_dict = checkpoint.get(key)
+                if state_dict is not None and "switching_onsets" not in state_dict:
+                    state_dict["switching_onsets"] = (
+                        0.673 * state_dict["switching_radii"]
+                    )
+            checkpoint["model_ckpt_version"] = 2
         if checkpoint["model_ckpt_version"] != version:
             raise NotImplementedError(
-                "NLH model does not support checkpoint upgrading. "
-                "There is only one checkpoint version."
+                f"Unable to upgrade the NLH checkpoint from version "
+                f"{checkpoint['model_ckpt_version']} to version {version}."
             )
         return checkpoint
 
